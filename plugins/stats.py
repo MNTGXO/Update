@@ -1,11 +1,8 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
-import time
-import os
+from config import BOT_START_TIME, UPDATE_INTERVAL_HOURS
 from database import get_subscribers
-
-BOT_START_TIME = time.time()
-UPDATE_INTERVAL_HOURS = int(os.getenv("UPDATE_INTERVAL_HOURS", "6"))
+import time
 
 @Client.on_message(filters.command("stats"))
 async def stats(client: Client, message: Message):
