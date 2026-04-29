@@ -1,106 +1,219 @@
 import asyncio
 import logging
 import os
+import sys
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from aiohttp import web
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Correct import for simple-justwatch-python-api 0.13+
-from simplejustwatchapi.justwatch import JustWatch
-
-import database as db
-
 load_dotenv()
 
 # ---------- Configuration ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("Missing BOT_TOKEN environment variable")
+    logging.error("Missing BOT_TOKEN environment variable")
+    sys.exit(1)
 
-CHAT_ID = os.getenv("CHAT_ID")          # optional: single channel/group ID
+CHAT_ID = os.getenv("CHAT_ID")
 UPDATE_INTERVAL_HOURS = int(os.getenv("UPDATE_INTERVAL_HOURS", "6"))
 PORT = int(os.getenv("PORT", "8080"))
 JUSTWATCH_COUNTRY = os.getenv("JUSTWATCH_COUNTRY", "US")
 JUSTWATCH_LANGUAGE = os.getenv("JUSTWATCH_LANGUAGE", "en")
 
-# ---------- Logging ----------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ---------- JustWatch Client ----------
-justwatch_client = JustWatch(country=JUSTWATCH_COUNTRY, language=JUSTWATCH_LANGUAGE)
+# ---------- Database setup ----------
+import sqlite3
+from typing import List
 
-# ---------- JustWatch Helpers ----------
-async def get_new_releases(days_back: int = 14) -> List[Dict[str, Any]]:
+DB_PATH = "subscriptions.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS subscribers (
+            chat_id INTEGER PRIMARY KEY
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS sent_items (
+            item_id TEXT PRIMARY KEY,
+            sent_at TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def add_subscriber(chat_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO subscribers (chat_id) VALUES (?)", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def remove_subscriber(chat_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM subscribers WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def get_subscribers() -> List[int]:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT chat_id FROM subscribers")
+    rows = c.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+def is_item_sent(item_id: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM sent_items WHERE item_id = ?", (item_id,))
+    exists = c.fetchone() is not None
+    conn.close()
+    return exists
+
+def mark_item_sent(item_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR IGNORE INTO sent_items (item_id, sent_at) VALUES (?, ?)",
+        (item_id, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+# ---------- JustWatch API Helpers ----------
+async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
     """
-    Fetch movies and TV series that were released within the last 'days_back' days.
-    Uses JustWatch search for popular items (empty query) and filters by release date.
+    Fetch movies and TV series using JustWatch's search function and filter by release date.
+    Uses a try/except pattern to handle potential API differences.
     """
     cutoff_date = datetime.now() - timedelta(days=days_back)
     new_items = []
 
-    # For both movies (content_type="movie") and TV shows (content_type="show")
-    for content_type in ["movie", "show"]:
-        try:
-            # Run synchronous JustWatch search in a thread pool
-            loop = asyncio.get_event_loop()
-            results = await loop.run_in_executor(
-                None,
-                lambda ct=content_type: justwatch_client.search_for_item(
-                    query="",                      # empty = popular / trending
-                    content_types=[ct],
-                    page_size=30,
-                    # Optionally add other filters like `release_year_from` if needed
+    # Try the official 'simple-justwatch-python-api' approach first
+    try:
+        from simplejustwatchapi.justwatch import search as justwatch_search
+        
+        for content_type in ["movie", "show"]:
+            try:
+                loop = asyncio.get_event_loop()
+                search_query = "" if content_type == "movie" else ""
+                results = await loop.run_in_executor(
+                    None,
+                    lambda: justwatch_search(
+                        title=search_query,
+                        country=JUSTWATCH_COUNTRY,
+                        language=JUSTWATCH_LANGUAGE,
+                        count=30
+                    )
                 )
-            )
-
-            items = results.get("items", [])
-            for item in items:
-                # Extract release date (field names may vary – adjust if needed)
-                if content_type == "movie":
-                    release_date_str = item.get("original_release_date") or item.get("release_date")
-                else:  # show
-                    release_date_str = item.get("first_air_date")
-
-                if not release_date_str:
-                    continue
-
-                try:
-                    release_date = datetime.strptime(release_date_str, "%Y-%m-%d")
-                    if release_date < cutoff_date:
+                
+                for item in results:
+                    # Filter by content type based on object_type attribute
+                    item_type = getattr(item, 'object_type', '').lower()
+                    if content_type == "movie" and item_type != "movie":
                         continue
-                except (ValueError, TypeError):
-                    continue
-
-                item_id = f"{content_type}_{item.get('id')}"
-                if not db.is_item_sent(item_id):
-                    # Build a clean dict for messaging
-                    offers = []
-                    for offer in item.get("offers", []):
-                        package = offer.get("package", {}).get("package_name")
-                        if package and package not in offers:
-                            offers.append(package)
-
-                    new_items.append({
-                        "type": content_type,
-                        "id": item.get("id"),
-                        "title": item.get("title"),
-                        "release_date": release_date_str,
-                        "overview": item.get("short_description", "No description available."),
-                        "poster_url": item.get("poster_url"),
-                        "offers": offers[:5]  # max 5 streaming services
-                    })
-                    db.mark_item_sent(item_id)
-
-        except Exception as e:
-            logger.error(f"Error fetching {content_type}s from JustWatch: {e}")
-
+                    if content_type == "show" and item_type not in ["show", "tv_show"]:
+                        continue
+                    
+                    release_date = getattr(item, 'release_date', None)
+                    if not release_date:
+                        continue
+                    
+                    try:
+                        rel_date = datetime.strptime(release_date, "%Y-%m-%d")
+                        if rel_date < cutoff_date:
+                            continue
+                    except:
+                        continue
+                    
+                    item_id = f"{content_type}_{getattr(item, 'object_id', '')}"
+                    if not is_item_sent(item_id):
+                        # Extract platform names from offers
+                        platforms = []
+                        for offer in getattr(item, 'offers', []):
+                            platform_name = getattr(offer, 'name', None)
+                            if platform_name and platform_name not in platforms:
+                                platforms.append(platform_name)
+                        
+                        new_items.append({
+                            "type": content_type,
+                            "id": getattr(item, 'object_id', ''),
+                            "title": getattr(item, 'title', 'Unknown Title'),
+                            "release_date": release_date,
+                            "overview": getattr(item, 'short_description', 'No description available.'),
+                            "poster_url": getattr(item, 'poster', None),
+                            "offers": platforms[:5]  # Max 5 platforms
+                        })
+                        mark_item_sent(item_id)
+            except Exception as e:
+                logger.error(f"Error fetching {content_type}s with simple-justwatch-python-api: {e}")
+                
+    except ImportError:
+        logger.info("simple-justwatch-python-api not found, trying alternative import...")
+        
+        # Alternative approach: Try 'justwatch' library (different package)
+        try:
+            from justwatch import JustWatch
+            justwatch = JustWatch(country=JUSTWATCH_COUNTRY)
+            
+            for content_type in ["movie", "show"]:
+                try:
+                    results = justwatch.search_for_item(
+                        query="",
+                        content_types=[content_type],
+                        page_size=30
+                    )
+                    
+                    items = results.get("items", [])
+                    for item in items:
+                        release_date = item.get("original_release_date") or item.get("release_date")
+                        if not release_date:
+                            continue
+                        
+                        try:
+                            rel_date = datetime.strptime(release_date, "%Y-%m-%d")
+                            if rel_date < cutoff_date:
+                                continue
+                        except:
+                            continue
+                        
+                        item_id = f"{content_type}_{item.get('id')}"
+                        if not is_item_sent(item_id):
+                            # Extract platform names from offers
+                            platforms = []
+                            for offer in item.get("offers", []):
+                                package = offer.get("package", {}).get("package_name")
+                                if package and package not in platforms:
+                                    platforms.append(package)
+                            
+                            new_items.append({
+                                "type": content_type,
+                                "id": item.get("id"),
+                                "title": item.get("title", "Unknown Title"),
+                                "release_date": release_date,
+                                "overview": item.get("short_description", "No description available."),
+                                "poster_url": item.get("poster_url"),
+                                "offers": platforms[:5]
+                            })
+                            mark_item_sent(item_id)
+                except Exception as e:
+                    logger.error(f"Error fetching {content_type}s with justwatch library: {e}")
+                    
+        except ImportError:
+            logger.error("No JustWatch library found. Please install simple-justwatch-python-api or justwatch.")
+    
     return new_items
 
 def format_item_message(item: Dict[str, Any]) -> str:
@@ -108,7 +221,7 @@ def format_item_message(item: Dict[str, Any]) -> str:
     media_type = "🎬 Movie" if item["type"] == "movie" else "📺 TV Series"
     title = item["title"]
     release_date = item["release_date"]
-    year = release_date[:4] if release_date else "?"
+    year = release_date[:4] if release_date and len(release_date) >= 4 else "?"
     overview = item["overview"]
     if len(overview) > 500:
         overview = overview[:497] + "..."
@@ -132,7 +245,7 @@ async def send_to_subscribers(context: ContextTypes.DEFAULT_TYPE, text: str, par
         for cid in str(CHAT_ID).split(","):
             chat_ids.add(int(cid.strip()))
     else:
-        chat_ids.update(db.get_subscribers())
+        chat_ids.update(get_subscribers())
 
     if not chat_ids:
         logger.info("No subscribers and no CHAT_ID. Nothing to send.")
@@ -148,7 +261,7 @@ async def check_updates(context: ContextTypes.DEFAULT_TYPE):
     """Job that fetches new items and broadcasts them."""
     logger.info("Checking for new OTT releases via JustWatch...")
     try:
-        new_items = await get_new_releases(days_back=14)  # last 14 days
+        new_items = await get_new_releases(days_back=7)  # Last 7 days
         if not new_items:
             logger.info("No new releases found.")
             return
@@ -179,7 +292,7 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Individual subscriptions are disabled."
         )
         return
-    db.add_subscriber(chat_id)
+    add_subscriber(chat_id)
     await update.message.reply_text("✅ Subscribed! You'll receive OTT updates.")
 
 async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,7 +300,7 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if CHAT_ID:
         await update.message.reply_text("Individual subscriptions disabled.")
         return
-    db.remove_subscriber(chat_id)
+    remove_subscriber(chat_id)
     await update.message.reply_text("❌ Unsubscribed.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -212,12 +325,11 @@ async def run_web_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     logger.info(f"Health check server running on port {PORT}")
-    # Keep alive forever
-    await asyncio.Event().wait()
+    await asyncio.Event().wait()  # Keep alive forever
 
 # ---------- Main ----------
 async def main():
-    db.init_db()
+    init_db()
 
     application = Application.builder().token(BOT_TOKEN).build()
 
