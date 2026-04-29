@@ -1,8 +1,6 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
-import os
-
-JUSTWATCH_COUNTRY = os.getenv("JUSTWATCH_COUNTRY", "US")
+from config import JUSTWATCH_COUNTRY
 
 @Client.on_message(filters.command("platforms"))
 async def platforms(client: Client, message: Message):
