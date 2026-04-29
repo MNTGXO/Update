@@ -1,17 +1,14 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
-import os
 import asyncio
+from config import ADMIN_ID
 from database import get_subscribers
-
-ADMIN_ID = os.getenv("ADMIN_ID")
 
 @Client.on_message(filters.command("broadcast") & filters.user(int(ADMIN_ID)) if ADMIN_ID else filters.command("broadcast"))
 async def broadcast(client: Client, message: Message):
     if not ADMIN_ID:
         await message.reply_text("Admin not configured.")
         return
-    # Check if user is admin (filter already does)
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
         await message.reply_text("Usage: /broadcast <message>")
