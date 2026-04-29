@@ -3,7 +3,6 @@ import logging
 import os
 import sys
 import time
-import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 
@@ -27,7 +26,7 @@ PORT = int(os.getenv("PORT", "8080"))
 JUSTWATCH_COUNTRY = os.getenv("JUSTWATCH_COUNTRY", "US")
 JUSTWATCH_LANGUAGE = os.getenv("JUSTWATCH_LANGUAGE", "en")
 
-# Enable logging
+# Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -35,10 +34,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ---------- Bot start time ----------
 BOT_START_TIME = time.time()
 
-# ---------- Database setup ----------
+# ---------- Database ----------
 import sqlite3
 
 DB_PATH = "subscriptions.db"
@@ -90,11 +88,10 @@ def mark_item_sent(item_id: str):
     conn.commit()
     conn.close()
 
-# ---------- JustWatch Helper ----------
+# ---------- JustWatch ----------
 async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
     cutoff_date = datetime.now() - timedelta(days=days_back)
     new_items = []
-
     try:
         from simplejustwatchapi.justwatch import search as justwatch_search
         
@@ -110,7 +107,7 @@ async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
                         count=30
                     )
                 )
-                logger.info(f"Fetched {len(results)} items for {content_type}")
+                logger.info(f"Fetched {len(results)} {content_type}s")
                 for item in results:
                     item_type = getattr(item, 'object_type', '').lower()
                     if content_type == "movie" and item_type != "movie":
@@ -140,32 +137,29 @@ async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
                         new_items.append({
                             "type": content_type,
                             "id": getattr(item, 'object_id', ''),
-                            "title": getattr(item, 'title', 'Unknown Title'),
+                            "title": getattr(item, 'title', 'Unknown'),
                             "release_date": release_date,
-                            "overview": getattr(item, 'short_description', 'No description available.'),
+                            "overview": getattr(item, 'short_description', 'No description.'),
                             "offers": platforms[:5]
                         })
                         mark_item_sent(item_id)
             except Exception as e:
                 logger.error(f"Error fetching {content_type}s: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"JustWatch import/usage error: {e}", exc_info=True)
-    
+        logger.error(f"JustWatch error: {e}", exc_info=True)
     return new_items
 
 def format_item_message(item: Dict[str, Any]) -> str:
     media_type = "🎬 Movie" if item["type"] == "movie" else "📺 TV Series"
     title = item["title"]
     release_date = item["release_date"]
-    year = release_date[:4] if release_date and len(release_date) >= 4 else "?"
-    overview = item["overview"]
-    if len(overview) > 500:
-        overview = overview[:497] + "..."
-    platforms_text = ", ".join(item.get("offers", [])) if item.get("offers") else "Check JustWatch"
+    year = release_date[:4] if release_date else "?"
+    overview = item["overview"][:500]
+    platforms = ", ".join(item.get("offers", [])) if item.get("offers") else "Check JustWatch"
     return (
         f"*{media_type}: {title} ({year})*\n"
         f"📅 *Release:* {release_date}\n"
-        f"📺 *Watch on:* {platforms_text}\n\n"
+        f"📺 *Watch on:* {platforms}\n\n"
         f"{overview}\n\n"
         f"[More info](https://www.justwatch.com/{JUSTWATCH_COUNTRY}/{item['type']}/{item['id']})"
     )
@@ -183,24 +177,23 @@ async def send_to_subscribers(context: ContextTypes.DEFAULT_TYPE, text: str):
         try:
             await context.bot.send_message(chat_id=cid, text=text, parse_mode="Markdown")
         except Exception as e:
-            logger.error(f"Failed to send to {cid}: {e}")
+            logger.error(f"Send fail {cid}: {e}")
 
 async def check_updates(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Checking for new OTT releases...")
+    logger.info("Checking for new releases...")
     try:
-        new_items = await get_new_releases(days_back=7)
-        if not new_items:
-            logger.info("No new releases found.")
+        items = await get_new_releases(days_back=7)
+        if not items:
+            logger.info("No new releases.")
             return
-        for item in new_items:
+        for item in items:
             await send_to_subscribers(context, format_item_message(item))
-        logger.info(f"Sent {len(new_items)} new releases.")
+        logger.info(f"Sent {len(items)} releases.")
     except Exception as e:
         logger.exception("Error in check_updates")
 
 # ---------- Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Start command from {update.effective_user.id}")
     await update.message.reply_text(
         "🎬 *OTT Updates Bot*\n\n"
         "/subscribe – Get updates\n"
@@ -209,7 +202,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/platforms – Streaming services\n"
         "/stats – Bot stats\n"
         "/about – Info\n"
-        "/help – This help",
+        "/help – Help",
         parse_mode="Markdown"
     )
 
@@ -229,30 +222,26 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Checking...")
-    try:
-        items = await get_new_releases(days_back=7)
-        if not items:
-            await update.message.reply_text("No new releases (last 7 days).")
-            return
-        for item in items:
-            await update.message.reply_text(format_item_message(item), parse_mode="Markdown")
-            await asyncio.sleep(0.5)
-        await update.message.reply_text(f"✅ {len(items)} new releases.")
-    except Exception as e:
-        logger.exception("Error in /latest")
-        await update.message.reply_text("❌ Error fetching releases.")
+    items = await get_new_releases(days_back=7)
+    if not items:
+        await update.message.reply_text("No new releases in the last 7 days.")
+        return
+    for item in items:
+        await update.message.reply_text(format_item_message(item), parse_mode="Markdown")
+        await asyncio.sleep(0.5)
+    await update.message.reply_text(f"✅ Found {len(items)} new releases.")
 
 async def platforms(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🎬 *Streaming platforms* (region: {JUSTWATCH_COUNTRY})\n\nNetflix, Prime, Disney+, Hulu, Apple TV+, HBO Max, Peacock, Paramount+, and more.", parse_mode="Markdown")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sub_count = len(get_subscribers())
+    sub = len(get_subscribers())
     uptime = int(time.time() - BOT_START_TIME)
-    days, rem = divmod(uptime, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, seconds = divmod(rem, 60)
+    d, r = divmod(uptime, 86400)
+    h, r = divmod(r, 3600)
+    m, s = divmod(r, 60)
     await update.message.reply_text(
-        f"📊 *Bot Stats*\n\n👥 Subscribers: {sub_count}\n⏱️ Uptime: {days}d {hours}h {minutes}m\n🔄 Interval: {UPDATE_INTERVAL_HOURS}h\n🌍 Region: {JUSTWATCH_COUNTRY}",
+        f"📊 *Stats*\n\n👥 Subscribers: {sub}\n⏱️ Uptime: {d}d {h}h {m}m\n🔄 Interval: {UPDATE_INTERVAL_HOURS}h\n🌍 Region: {JUSTWATCH_COUNTRY}",
         parse_mode="Markdown"
     )
 
@@ -282,26 +271,28 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(0.1)
         except Exception as e:
             logger.error(f"Broadcast fail {cid}: {e}")
-    await update.message.reply_text(f"Sent to {success}/{len(subs)} subscribers.")
+    await update.message.reply_text(f"Sent to {success}/{len(subs)}.")
 
-# ---------- Health Check Server (runs in separate thread) ----------
-def run_health_server():
+# ---------- HTTP Health Check Server (same event loop) ----------
+async def health_check_handler(request):
+    return web.Response(text="OK")
+
+async def run_health_server():
     app = web.Application()
-    async def health_check(request):
-        return web.Response(text="OK")
-    app.router.add_get("/health", health_check)
-    web.run_app(app, host="0.0.0.0", port=PORT)
+    app.router.add_get("/health", health_check_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Health check server running on port {PORT}")
+    # Keep the server alive indefinitely
+    await asyncio.Event().wait()
 
 # ---------- Main ----------
 async def main():
     init_db()
     
-    # Start health check server in a background thread
-    thread = threading.Thread(target=run_health_server, daemon=True)
-    thread.start()
-    logger.info(f"Health check server running on port {PORT}")
-    
-    # Create bot application
+    # Build bot application
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Add handlers
@@ -316,14 +307,14 @@ async def main():
     if ADMIN_ID:
         application.add_handler(CommandHandler("broadcast", broadcast))
     
-    # Set bot commands menu
+    # Set commands menu
     commands = [
         BotCommand("start", "Welcome"),
         BotCommand("subscribe", "Get updates"),
         BotCommand("unsubscribe", "Stop updates"),
         BotCommand("latest", "Manual check"),
         BotCommand("platforms", "Streaming platforms"),
-        BotCommand("stats", "Bot stats"),
+        BotCommand("stats", "Bot statistics"),
         BotCommand("about", "About"),
         BotCommand("help", "Help"),
     ]
@@ -331,15 +322,19 @@ async def main():
         commands.append(BotCommand("broadcast", "Admin broadcast"))
     await application.bot.set_my_commands(commands)
     
-    # Schedule periodic updates
+    # Job queue
     job_queue = application.job_queue
     if job_queue:
         job_queue.run_repeating(check_updates, interval=UPDATE_INTERVAL_HOURS * 3600, first=10)
         logger.info(f"Scheduled updates every {UPDATE_INTERVAL_HOURS} hours")
+    else:
+        logger.warning("JobQueue not available; install with 'pip install python-telegram-bot[job-queue]'")
     
-    # Start polling (blocking)
-    logger.info("Starting bot polling...")
-    await application.run_polling()
+    # Run bot polling and health server concurrently
+    await asyncio.gather(
+        application.run_polling(),
+        run_health_server()
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
