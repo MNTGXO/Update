@@ -1,6 +1,6 @@
 pyrotgfork
-tgcrypto==1.2.5
-aiohttp==3.9.3
-python-dotenv==1.0.1
-apscheduler==3.10.4
+tgcrypto
+aiohttp
+python-dotenv
+apscheduler
 simple-justwatch-python-api==0.13
