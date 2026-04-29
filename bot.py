@@ -2,14 +2,14 @@ import asyncio
 import logging
 import os
 import sys
-import time
+from datetime import datetime, timedelta
 from aiohttp import web
 from dotenv import load_dotenv
 from pyrogram import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from database import init_db, get_subscribers
 from utils import get_new_releases, format_item_message
-import database  # to access functions
+from config import UPDATE_INTERVAL_HOURS, CHAT_ID
 
 load_dotenv()
 
@@ -21,9 +21,6 @@ if not BOT_TOKEN or not API_ID or not API_HASH:
     logging.error("Missing API_ID, API_HASH or BOT_TOKEN")
     sys.exit(1)
 
-ADMIN_ID = os.getenv("ADMIN_ID")
-CHAT_ID = os.getenv("CHAT_ID")
-UPDATE_INTERVAL_HOURS = int(os.getenv("UPDATE_INTERVAL_HOURS", "6"))
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(
@@ -32,8 +29,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
-
-BOT_START_TIME = time.time()
 
 # ---------- Initialize DB ----------
 init_db()
@@ -67,7 +62,7 @@ async def send_updates():
         for item in items:
             try:
                 await app.send_message(cid, format_item_message(item), parse_mode="Markdown")
-                await asyncio.sleep(0.5)  # avoid flood wait
+                await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"Failed to send to {cid}: {e}")
     logger.info(f"Sent {len(items)} releases to {len(chat_ids)} chats.")
@@ -84,23 +79,24 @@ async def run_health_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     logger.info(f"Health check server running on port {PORT}")
-    # Keep alive
     await asyncio.Event().wait()
 
 # ---------- Main ----------
 async def main():
-    # Schedule periodic updates
-    scheduler.add_job(send_updates, 'interval', hours=UPDATE_INTERVAL_HOURS, next_run_time=asyncio.get_event_loop().time() + 10)
+    # Schedule periodic updates – use datetime for next_run_time
+    now = datetime.now()
+    next_run = now + timedelta(seconds=10)
+    scheduler.add_job(send_updates, 'interval', hours=UPDATE_INTERVAL_HOURS, next_run_time=next_run)
     scheduler.start()
     logger.info(f"Scheduled updates every {UPDATE_INTERVAL_HOURS} hours")
     
-    # Start the health server as a background task
+    # Start health server (non-blocking)
     asyncio.create_task(run_health_server())
     
-    # Start the bot
+    # Start bot (this blocks)
     await app.start()
     logger.info("Bot started")
-    await asyncio.Event().wait()  # run forever
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
