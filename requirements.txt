@@ -1,4 +1,4 @@
 python-telegram-bot==20.7
-aiohttp==3.9.3
-python-dotenv==1.0.1
+aiohttp==3.13.4
+python-dotenv==1.2.2
 simple-justwatch-python-api==0.13
