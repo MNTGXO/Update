@@ -2,8 +2,9 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 from aiohttp import web
 from dotenv import load_dotenv
@@ -18,7 +19,8 @@ if not BOT_TOKEN:
     logging.error("Missing BOT_TOKEN environment variable")
     sys.exit(1)
 
-CHAT_ID = os.getenv("CHAT_ID")
+ADMIN_ID = os.getenv("ADMIN_ID")  # optional, numeric Telegram user ID
+CHAT_ID = os.getenv("CHAT_ID")    # optional fixed channel/group
 UPDATE_INTERVAL_HOURS = int(os.getenv("UPDATE_INTERVAL_HOURS", "6"))
 PORT = int(os.getenv("PORT", "8080"))
 JUSTWATCH_COUNTRY = os.getenv("JUSTWATCH_COUNTRY", "US")
@@ -29,9 +31,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ---------- Bot start time for uptime stats ----------
+BOT_START_TIME = time.time()
+
 # ---------- Database setup ----------
 import sqlite3
-from typing import List
 
 DB_PATH = "subscriptions.db"
 
@@ -94,25 +98,19 @@ def mark_item_sent(item_id: str):
 
 # ---------- JustWatch API Helpers ----------
 async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
-    """
-    Fetch movies and TV series using JustWatch's search function and filter by release date.
-    Uses a try/except pattern to handle potential API differences.
-    """
     cutoff_date = datetime.now() - timedelta(days=days_back)
     new_items = []
 
-    # Try the official 'simple-justwatch-python-api' approach first
     try:
         from simplejustwatchapi.justwatch import search as justwatch_search
         
         for content_type in ["movie", "show"]:
             try:
                 loop = asyncio.get_event_loop()
-                search_query = "" if content_type == "movie" else ""
                 results = await loop.run_in_executor(
                     None,
                     lambda: justwatch_search(
-                        title=search_query,
+                        title="",
                         country=JUSTWATCH_COUNTRY,
                         language=JUSTWATCH_LANGUAGE,
                         count=30
@@ -120,7 +118,6 @@ async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
                 )
                 
                 for item in results:
-                    # Filter by content type based on object_type attribute
                     item_type = getattr(item, 'object_type', '').lower()
                     if content_type == "movie" and item_type != "movie":
                         continue
@@ -140,7 +137,6 @@ async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
                     
                     item_id = f"{content_type}_{getattr(item, 'object_id', '')}"
                     if not is_item_sent(item_id):
-                        # Extract platform names from offers
                         platforms = []
                         for offer in getattr(item, 'offers', []):
                             platform_name = getattr(offer, 'name', None)
@@ -154,70 +150,17 @@ async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
                             "release_date": release_date,
                             "overview": getattr(item, 'short_description', 'No description available.'),
                             "poster_url": getattr(item, 'poster', None),
-                            "offers": platforms[:5]  # Max 5 platforms
+                            "offers": platforms[:5]
                         })
                         mark_item_sent(item_id)
             except Exception as e:
-                logger.error(f"Error fetching {content_type}s with simple-justwatch-python-api: {e}")
-                
+                logger.error(f"Error fetching {content_type}s: {e}")
     except ImportError:
-        logger.info("simple-justwatch-python-api not found, trying alternative import...")
-        
-        # Alternative approach: Try 'justwatch' library (different package)
-        try:
-            from justwatch import JustWatch
-            justwatch = JustWatch(country=JUSTWATCH_COUNTRY)
-            
-            for content_type in ["movie", "show"]:
-                try:
-                    results = justwatch.search_for_item(
-                        query="",
-                        content_types=[content_type],
-                        page_size=30
-                    )
-                    
-                    items = results.get("items", [])
-                    for item in items:
-                        release_date = item.get("original_release_date") or item.get("release_date")
-                        if not release_date:
-                            continue
-                        
-                        try:
-                            rel_date = datetime.strptime(release_date, "%Y-%m-%d")
-                            if rel_date < cutoff_date:
-                                continue
-                        except:
-                            continue
-                        
-                        item_id = f"{content_type}_{item.get('id')}"
-                        if not is_item_sent(item_id):
-                            # Extract platform names from offers
-                            platforms = []
-                            for offer in item.get("offers", []):
-                                package = offer.get("package", {}).get("package_name")
-                                if package and package not in platforms:
-                                    platforms.append(package)
-                            
-                            new_items.append({
-                                "type": content_type,
-                                "id": item.get("id"),
-                                "title": item.get("title", "Unknown Title"),
-                                "release_date": release_date,
-                                "overview": item.get("short_description", "No description available."),
-                                "poster_url": item.get("poster_url"),
-                                "offers": platforms[:5]
-                            })
-                            mark_item_sent(item_id)
-                except Exception as e:
-                    logger.error(f"Error fetching {content_type}s with justwatch library: {e}")
-                    
-        except ImportError:
-            logger.error("No JustWatch library found. Please install simple-justwatch-python-api or justwatch.")
+        logger.error("simple-justwatch-python-api not installed")
     
     return new_items
 
 def format_item_message(item: Dict[str, Any]) -> str:
-    """Create a nice Telegram message for a movie or TV series."""
     media_type = "🎬 Movie" if item["type"] == "movie" else "📺 TV Series"
     title = item["title"]
     release_date = item["release_date"]
@@ -239,7 +182,6 @@ def format_item_message(item: Dict[str, Any]) -> str:
 
 # ---------- Broadcast Helpers ----------
 async def send_to_subscribers(context: ContextTypes.DEFAULT_TYPE, text: str, parse_mode="Markdown"):
-    """Send a message to all subscribers + CHAT_ID if set."""
     chat_ids = set()
     if CHAT_ID:
         for cid in str(CHAT_ID).split(","):
@@ -258,10 +200,9 @@ async def send_to_subscribers(context: ContextTypes.DEFAULT_TYPE, text: str, par
             logger.error(f"Failed to send to {cid}: {e}")
 
 async def check_updates(context: ContextTypes.DEFAULT_TYPE):
-    """Job that fetches new items and broadcasts them."""
     logger.info("Checking for new OTT releases via JustWatch...")
     try:
-        new_items = await get_new_releases(days_back=7)  # Last 7 days
+        new_items = await get_new_releases(days_back=7)
         if not new_items:
             logger.info("No new releases found.")
             return
@@ -277,11 +218,17 @@ async def check_updates(context: ContextTypes.DEFAULT_TYPE):
 # ---------- Bot Commands ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎬 Welcome to OTT Updates Bot!\n\n"
-        "I fetch new movies and TV series added to streaming platforms (via JustWatch).\n"
-        "Use /subscribe to receive updates.\n"
-        "Use /unsubscribe to stop.\n"
-        "Use /help for more info."
+        "🎬 *Welcome to OTT Updates Bot!*\n\n"
+        "I fetch new movies and TV series recently added to streaming platforms (via JustWatch).\n\n"
+        "*/subscribe* – Get updates\n"
+        "*/unsubscribe* – Stop updates\n"
+        "*/latest* – Manually check for new releases\n"
+        "*/platforms* – See supported streaming services\n"
+        "*/stats* – Bot statistics\n"
+        "*/about* – About this bot\n"
+        "*/help* – Show this help\n\n"
+        f"⏱️ Updates every {UPDATE_INTERVAL_HOURS} hours.",
+        parse_mode="Markdown"
     )
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -303,15 +250,120 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remove_subscriber(chat_id)
     await update.message.reply_text("❌ Unsubscribed.")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Commands:\n"
-        "/start - Welcome\n"
-        "/subscribe - Get updates\n"
-        "/unsubscribe - Stop updates\n"
-        "/help - This message\n\n"
-        f"Bot checks for new releases every {UPDATE_INTERVAL_HOURS} hours."
+async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually trigger a check for new releases."""
+    await update.message.reply_text("🔍 Checking for latest releases... Please wait.")
+    try:
+        new_items = await get_new_releases(days_back=7)
+        if not new_items:
+            await update.message.reply_text("No new releases found in the last 7 days.")
+            return
+        
+        # Send each new item to the user who requested
+        for item in new_items:
+            msg = format_item_message(item)
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            await asyncio.sleep(0.5)  # avoid flooding
+        
+        await update.message.reply_text(f"✅ Found {len(new_items)} new releases.")
+    except Exception as e:
+        logger.exception("Error in /latest")
+        await update.message.reply_text("❌ Failed to fetch releases. Please try again later.")
+
+async def platforms(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show a list of common streaming platforms tracked by JustWatch."""
+    platform_list = (
+        "🎬 *Supported Streaming Platforms (via JustWatch)*\n\n"
+        "• Netflix\n"
+        "• Amazon Prime Video\n"
+        "• Disney+\n"
+        "• Hulu\n"
+        "• Apple TV+\n"
+        "• HBO Max\n"
+        "• Peacock\n"
+        "• Paramount+\n"
+        "• YouTube\n"
+        "• Google Play Movies\n"
+        "• Vudu\n"
+        "• And many more...\n\n"
+        "The bot shows availability based on your region (current: `{}`).".format(JUSTWATCH_COUNTRY)
     )
+    await update.message.reply_text(platform_list, parse_mode="Markdown")
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show bot statistics."""
+    sub_count = len(get_subscribers())
+    uptime_seconds = int(time.time() - BOT_START_TIME)
+    days, remainder = divmod(uptime_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
+    
+    stats_msg = (
+        f"📊 *Bot Statistics*\n\n"
+        f"👥 Subscribers: {sub_count}\n"
+        f"⏱️ Uptime: {uptime_str}\n"
+        f"🔄 Update interval: {UPDATE_INTERVAL_HOURS} hours\n"
+        f"🌍 Region: {JUSTWATCH_COUNTRY}\n"
+        f"💾 Database: SQLite (local)"
+    )
+    await update.message.reply_text(stats_msg, parse_mode="Markdown")
+
+async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """About this bot."""
+    about_msg = (
+        "🤖 *About OTT Updates Bot*\n\n"
+        "This bot fetches newly released movies and TV series added to streaming platforms using JustWatch data.\n\n"
+        "No API key required – uses JustWatch's public search.\n\n"
+        "Developed with python-telegram-bot and deployed on Koyeb.\n\n"
+        "Source code & support: [GitHub Repository](https://github.com/yourusername/telegram-justwatch-bot)\n\n"
+        "Data provided by [JustWatch](https://www.justwatch.com)."
+    )
+    await update.message.reply_text(about_msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show help menu."""
+    help_text = (
+        "📖 *Available Commands*\n\n"
+        "/start – Welcome & main menu\n"
+        "/subscribe – Receive OTT updates\n"
+        "/unsubscribe – Stop updates\n"
+        "/latest – Manually fetch latest releases\n"
+        "/platforms – Show supported streaming platforms\n"
+        "/stats – Bot statistics\n"
+        "/about – Information about this bot\n"
+        "/help – Show this help\n\n"
+        f"⏲️ Automatic updates every {UPDATE_INTERVAL_HOURS} hours."
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+# ---------- Admin-only commands (if ADMIN_ID set) ----------
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to send a message to all subscribers."""
+    if ADMIN_ID and update.effective_user.id != int(ADMIN_ID):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast <message>")
+        return
+    
+    message = " ".join(context.args)
+    subscribers = get_subscribers()
+    if not subscribers:
+        await update.message.reply_text("No subscribers to broadcast to.")
+        return
+    
+    success_count = 0
+    for chat_id in subscribers:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=f"📢 *Announcement*\n\n{message}", parse_mode="Markdown")
+            success_count += 1
+            await asyncio.sleep(0.1)  # small delay to avoid hitting limits
+        except Exception as e:
+            logger.error(f"Broadcast failed to {chat_id}: {e}")
+    
+    await update.message.reply_text(f"Broadcast sent to {success_count}/{len(subscribers)} subscribers.")
 
 # ---------- HTTP Health Check Server ----------
 async def health_check(request):
@@ -325,7 +377,7 @@ async def run_web_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     logger.info(f"Health check server running on port {PORT}")
-    await asyncio.Event().wait()  # Keep alive forever
+    await asyncio.Event().wait()
 
 # ---------- Main ----------
 async def main():
@@ -333,18 +385,36 @@ async def main():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # Add all command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("subscribe", subscribe))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    application.add_handler(CommandHandler("latest", latest))
+    application.add_handler(CommandHandler("platforms", platforms))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("about", about))
     application.add_handler(CommandHandler("help", help_command))
-
-    await application.bot.set_my_commands([
-        BotCommand("start", "Welcome"),
+    
+    # Admin command (if ADMIN_ID provided)
+    if ADMIN_ID:
+        application.add_handler(CommandHandler("broadcast", broadcast))
+    
+    # Set bot commands for menu
+    commands = [
+        BotCommand("start", "Welcome & main menu"),
         BotCommand("subscribe", "Receive OTT updates"),
         BotCommand("unsubscribe", "Stop updates"),
+        BotCommand("latest", "Manually fetch latest releases"),
+        BotCommand("platforms", "Show supported streaming platforms"),
+        BotCommand("stats", "Bot statistics"),
+        BotCommand("about", "About this bot"),
         BotCommand("help", "Show help"),
-    ])
-
+    ]
+    if ADMIN_ID:
+        commands.append(BotCommand("broadcast", "Send message to all subscribers (admin only)"))
+    
+    await application.bot.set_my_commands(commands)
+    
     # Schedule periodic updates
     job_queue = application.job_queue
     if job_queue:
@@ -356,13 +426,13 @@ async def main():
         logger.info(f"Scheduled updates every {UPDATE_INTERVAL_HOURS} hours")
     else:
         logger.warning("JobQueue not available")
-
+    
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
-
+    
     web_task = asyncio.create_task(run_web_server())
-
+    
     try:
         await asyncio.gather(application.updater.stop(), web_task)
     except KeyboardInterrupt:
