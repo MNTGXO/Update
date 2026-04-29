@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import time
+import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 
@@ -26,19 +27,15 @@ PORT = int(os.getenv("PORT", "8080"))
 JUSTWATCH_COUNTRY = os.getenv("JUSTWATCH_COUNTRY", "US")
 JUSTWATCH_LANGUAGE = os.getenv("JUSTWATCH_LANGUAGE", "en")
 
-# Enable logging to see everything
+# Enable logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-# Also log everything to stderr for Koyeb
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-logger.addHandler(console_handler)
-
-# ---------- Bot start time for uptime stats ----------
+# ---------- Bot start time ----------
 BOT_START_TIME = time.time()
 
 # ---------- Database setup ----------
@@ -49,17 +46,8 @@ DB_PATH = "subscriptions.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS subscribers (
-            chat_id INTEGER PRIMARY KEY
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sent_items (
-            item_id TEXT PRIMARY KEY,
-            sent_at TIMESTAMP
-        )
-    """)
+    c.execute("CREATE TABLE IF NOT EXISTS subscribers (chat_id INTEGER PRIMARY KEY)")
+    c.execute("CREATE TABLE IF NOT EXISTS sent_items (item_id TEXT PRIMARY KEY, sent_at TIMESTAMP)")
     conn.commit()
     conn.close()
     logger.info("Database initialized")
@@ -97,14 +85,12 @@ def is_item_sent(item_id: str) -> bool:
 def mark_item_sent(item_id: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        "INSERT OR IGNORE INTO sent_items (item_id, sent_at) VALUES (?, ?)",
-        (item_id, datetime.now().isoformat())
-    )
+    c.execute("INSERT OR IGNORE INTO sent_items (item_id, sent_at) VALUES (?, ?)",
+              (item_id, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
-# ---------- JustWatch API Helper ----------
+# ---------- JustWatch Helper ----------
 async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
     cutoff_date = datetime.now() - timedelta(days=days_back)
     new_items = []
@@ -162,10 +148,8 @@ async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
                         mark_item_sent(item_id)
             except Exception as e:
                 logger.error(f"Error fetching {content_type}s: {e}", exc_info=True)
-    except ImportError as e:
-        logger.error(f"SimpleJustWatch import error: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"Unexpected error in get_new_releases: {e}", exc_info=True)
+        logger.error(f"JustWatch import/usage error: {e}", exc_info=True)
     
     return new_items
 
@@ -177,33 +161,27 @@ def format_item_message(item: Dict[str, Any]) -> str:
     overview = item["overview"]
     if len(overview) > 500:
         overview = overview[:497] + "..."
-
-    platforms_text = ", ".join(item.get("offers", [])) if item.get("offers") else "Check JustWatch for availability"
-
-    message = (
+    platforms_text = ", ".join(item.get("offers", [])) if item.get("offers") else "Check JustWatch"
+    return (
         f"*{media_type}: {title} ({year})*\n"
         f"📅 *Release:* {release_date}\n"
         f"📺 *Watch on:* {platforms_text}\n\n"
         f"{overview}\n\n"
-        f"[More info on JustWatch](https://www.justwatch.com/{JUSTWATCH_COUNTRY}/{item['type']}/{item['id']})"
+        f"[More info](https://www.justwatch.com/{JUSTWATCH_COUNTRY}/{item['type']}/{item['id']})"
     )
-    return message
 
-async def send_to_subscribers(context: ContextTypes.DEFAULT_TYPE, text: str, parse_mode="Markdown"):
+async def send_to_subscribers(context: ContextTypes.DEFAULT_TYPE, text: str):
     chat_ids = set()
     if CHAT_ID:
         for cid in str(CHAT_ID).split(","):
             chat_ids.add(int(cid.strip()))
     else:
         chat_ids.update(get_subscribers())
-
     if not chat_ids:
-        logger.info("No subscribers and no CHAT_ID.")
         return
-
     for cid in chat_ids:
         try:
-            await context.bot.send_message(chat_id=cid, text=text, parse_mode=parse_mode)
+            await context.bot.send_message(chat_id=cid, text=text, parse_mode="Markdown")
         except Exception as e:
             logger.error(f"Failed to send to {cid}: {e}")
 
@@ -215,22 +193,20 @@ async def check_updates(context: ContextTypes.DEFAULT_TYPE):
             logger.info("No new releases found.")
             return
         for item in new_items:
-            msg = format_item_message(item)
-            await send_to_subscribers(context, msg)
+            await send_to_subscribers(context, format_item_message(item))
         logger.info(f"Sent {len(new_items)} new releases.")
     except Exception as e:
         logger.exception("Error in check_updates")
 
 # ---------- Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Start command from user {update.effective_user.id}")
+    logger.info(f"Start command from {update.effective_user.id}")
     await update.message.reply_text(
-        "🎬 *Welcome to OTT Updates Bot!*\n\n"
-        "I fetch new movies and TV series added to streaming platforms.\n\n"
+        "🎬 *OTT Updates Bot*\n\n"
         "/subscribe – Get updates\n"
         "/unsubscribe – Stop\n"
         "/latest – Manual check\n"
-        "/platforms – Show streaming services\n"
+        "/platforms – Streaming services\n"
         "/stats – Bot stats\n"
         "/about – Info\n"
         "/help – This help",
@@ -238,72 +214,62 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if CHAT_ID:
-        await update.message.reply_text("Individual subscriptions disabled (broadcast mode).")
-        return
-    add_subscriber(chat_id)
-    await update.message.reply_text("✅ Subscribed!")
-
-async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
     if CHAT_ID:
         await update.message.reply_text("Individual subscriptions disabled.")
         return
-    remove_subscriber(chat_id)
+    add_subscriber(update.effective_chat.id)
+    await update.message.reply_text("✅ Subscribed!")
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if CHAT_ID:
+        await update.message.reply_text("Individual subscriptions disabled.")
+        return
+    remove_subscriber(update.effective_chat.id)
     await update.message.reply_text("❌ Unsubscribed.")
 
 async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Checking for latest releases...")
+    await update.message.reply_text("🔍 Checking...")
     try:
-        new_items = await get_new_releases(days_back=7)
-        if not new_items:
-            await update.message.reply_text("No new releases found in the last 7 days.")
+        items = await get_new_releases(days_back=7)
+        if not items:
+            await update.message.reply_text("No new releases (last 7 days).")
             return
-        for item in new_items:
-            msg = format_item_message(item)
-            await update.message.reply_text(msg, parse_mode="Markdown")
+        for item in items:
+            await update.message.reply_text(format_item_message(item), parse_mode="Markdown")
             await asyncio.sleep(0.5)
-        await update.message.reply_text(f"✅ Found {len(new_items)} new releases.")
+        await update.message.reply_text(f"✅ {len(items)} new releases.")
     except Exception as e:
         logger.exception("Error in /latest")
-        await update.message.reply_text("❌ Failed to fetch releases. Check logs.")
+        await update.message.reply_text("❌ Error fetching releases.")
 
 async def platforms(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = f"🎬 *Streaming platforms tracked* (region: {JUSTWATCH_COUNTRY})\n\nNetflix, Amazon Prime, Disney+, Hulu, Apple TV+, HBO Max, Peacock, Paramount+, YouTube, Google Play, Vudu, and more."
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(f"🎬 *Streaming platforms* (region: {JUSTWATCH_COUNTRY})\n\nNetflix, Prime, Disney+, Hulu, Apple TV+, HBO Max, Peacock, Paramount+, and more.", parse_mode="Markdown")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub_count = len(get_subscribers())
-    uptime_seconds = int(time.time() - BOT_START_TIME)
-    days, rem = divmod(uptime_seconds, 86400)
+    uptime = int(time.time() - BOT_START_TIME)
+    days, rem = divmod(uptime, 86400)
     hours, rem = divmod(rem, 3600)
     minutes, seconds = divmod(rem, 60)
-    uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
     await update.message.reply_text(
-        f"📊 *Bot Stats*\n\n👥 Subscribers: {sub_count}\n⏱️ Uptime: {uptime_str}\n🔄 Interval: {UPDATE_INTERVAL_HOURS}h\n🌍 Region: {JUSTWATCH_COUNTRY}",
+        f"📊 *Bot Stats*\n\n👥 Subscribers: {sub_count}\n⏱️ Uptime: {days}d {hours}h {minutes}m\n🔄 Interval: {UPDATE_INTERVAL_HOURS}h\n🌍 Region: {JUSTWATCH_COUNTRY}",
         parse_mode="Markdown"
     )
 
 async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 *OTT Updates Bot*\n\nUses JustWatch data. No API key required.\n\nData from [JustWatch](https://justwatch.com).",
-        parse_mode="Markdown",
-        disable_web_page_preview=True
-    )
+    await update.message.reply_text("🤖 *OTT Updates Bot*\n\nUses JustWatch data. No API key required.\n\nData from [JustWatch](https://justwatch.com).", parse_mode="Markdown", disable_web_page_preview=True)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)  # reuse start message
+    await start(update, context)
 
-# ---------- Admin broadcast ----------
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID and update.effective_user.id != int(ADMIN_ID):
-        await update.message.reply_text("⛔ Unauthorized.")
+        await update.message.reply_text("Unauthorized.")
         return
     if not context.args:
         await update.message.reply_text("Usage: /broadcast <message>")
         return
-    message = " ".join(context.args)
+    msg = " ".join(context.args)
     subs = get_subscribers()
     if not subs:
         await update.message.reply_text("No subscribers.")
@@ -311,31 +277,30 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success = 0
     for cid in subs:
         try:
-            await context.bot.send_message(chat_id=cid, text=f"📢 *Announcement*\n\n{message}", parse_mode="Markdown")
+            await context.bot.send_message(chat_id=cid, text=f"📢 *Announcement*\n\n{msg}", parse_mode="Markdown")
             success += 1
             await asyncio.sleep(0.1)
         except Exception as e:
-            logger.error(f"Broadcast failed to {cid}: {e}")
+            logger.error(f"Broadcast fail {cid}: {e}")
     await update.message.reply_text(f"Sent to {success}/{len(subs)} subscribers.")
 
-# ---------- Health check server ----------
-async def health_check(request):
-    return web.Response(text="OK")
-
-async def run_health_server():
+# ---------- Health Check Server (runs in separate thread) ----------
+def run_health_server():
     app = web.Application()
+    async def health_check(request):
+        return web.Response(text="OK")
     app.router.add_get("/health", health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"Health check server running on port {PORT}")
-    # Keep running indefinitely
-    await asyncio.Event().wait()
+    web.run_app(app, host="0.0.0.0", port=PORT)
 
 # ---------- Main ----------
 async def main():
     init_db()
+    
+    # Start health check server in a background thread
+    thread = threading.Thread(target=run_health_server, daemon=True)
+    thread.start()
+    logger.info(f"Health check server running on port {PORT}")
+    
     # Create bot application
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -351,7 +316,7 @@ async def main():
     if ADMIN_ID:
         application.add_handler(CommandHandler("broadcast", broadcast))
     
-    # Set commands menu
+    # Set bot commands menu
     commands = [
         BotCommand("start", "Welcome"),
         BotCommand("subscribe", "Get updates"),
@@ -372,24 +337,9 @@ async def main():
         job_queue.run_repeating(check_updates, interval=UPDATE_INTERVAL_HOURS * 3600, first=10)
         logger.info(f"Scheduled updates every {UPDATE_INTERVAL_HOURS} hours")
     
-    # Start health server in background
-    asyncio.create_task(run_health_server())
-    
-    # Start bot polling (this blocks until interrupted)
+    # Start polling (blocking)
     logger.info("Starting bot polling...")
-    await application.initialize()
-    await application.start()
-    # Use updater.start_polling() for v20
-    await application.updater.start_polling()
-    
-    # Keep running
-    try:
-        await asyncio.Event().wait()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        await application.updater.stop()
-        await application.stop()
+    await application.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
