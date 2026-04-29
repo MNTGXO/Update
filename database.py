@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List
 
 DB_PATH = "subscriptions.db"
@@ -7,17 +7,8 @@ DB_PATH = "subscriptions.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS subscribers (
-            chat_id INTEGER PRIMARY KEY
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sent_items (
-            item_id TEXT PRIMARY KEY,
-            sent_at TIMESTAMP
-        )
-    """)
+    c.execute("CREATE TABLE IF NOT EXISTS subscribers (chat_id INTEGER PRIMARY KEY)")
+    c.execute("CREATE TABLE IF NOT EXISTS sent_items (item_id TEXT PRIMARY KEY, sent_at TIMESTAMP)")
     conn.commit()
     conn.close()
 
@@ -54,9 +45,7 @@ def is_item_sent(item_id: str) -> bool:
 def mark_item_sent(item_id: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        "INSERT OR IGNORE INTO sent_items (item_id, sent_at) VALUES (?, ?)",
-        (item_id, datetime.now(timezone.utc).isoformat())
-    )
+    c.execute("INSERT OR IGNORE INTO sent_items (item_id, sent_at) VALUES (?, ?)",
+              (item_id, datetime.now().isoformat()))
     conn.commit()
     conn.close()
