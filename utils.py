@@ -2,13 +2,10 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
-import os
-
-JUSTWATCH_COUNTRY = os.getenv("JUSTWATCH_COUNTRY", "US")
-JUSTWATCH_LANGUAGE = os.getenv("JUSTWATCH_LANGUAGE", "en")
-logger = logging.getLogger(__name__)
-
+from config import JUSTWATCH_COUNTRY, JUSTWATCH_LANGUAGE
 from database import is_item_sent, mark_item_sent
+
+logger = logging.getLogger(__name__)
 
 async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
     cutoff_date = datetime.now() - timedelta(days=days_back)
