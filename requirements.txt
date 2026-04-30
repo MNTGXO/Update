@@ -1,6 +1,0 @@
-pyrotgfork
-tgcrypto
-aiohttp
-python-dotenv
-apscheduler
-simple-justwatch-python-api==0.13
