@@ -243,6 +243,8 @@ async def _fetch_justwatch(days_back: int) -> List[Dict[str, Any]]:
         # JustWatch poster URL template
         if poster and "{profile}" in poster:
             poster = poster.replace("{profile}", "s592").replace("{format}", "jpg")
+        if poster.startswith("/"):
+            poster = f"https://images.justwatch.com{poster}"
 
         await mark_item_sent(item_id, title)
         results.append({

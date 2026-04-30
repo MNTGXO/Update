@@ -88,8 +88,14 @@ async def send_updates():
                 poster = item.get("poster", "")
                 text   = format_item_message(item)
                 if poster:
-                    await bot.send_photo(cid, poster, caption=text,
-                                         parse_mode=enums.ParseMode.HTML)
+                    try:
+                        await bot.send_photo(cid, poster, caption=text,
+                                             parse_mode=enums.ParseMode.HTML)
+                    except Exception as photo_exc:
+                        logger.warning(f"Photo send failed for {cid}, falling back to text: {photo_exc}")
+                        await bot.send_message(cid, text,
+                                               parse_mode=enums.ParseMode.HTML,
+                                               disable_web_page_preview=False)
                 else:
                     await bot.send_message(cid, text,
                                            parse_mode=enums.ParseMode.HTML,
