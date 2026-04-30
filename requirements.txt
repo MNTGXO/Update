@@ -1,0 +1,5 @@
+pyrogram==2.0.106
+TgCrypto
+aiohttp>=3.9.0
+python-dotenv>=1.0.0
+APScheduler>=3.10.0
