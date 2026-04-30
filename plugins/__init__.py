@@ -1,1 +1,0 @@
-# sugalle mwone ninakk
