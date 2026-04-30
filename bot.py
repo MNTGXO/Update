@@ -117,6 +117,16 @@ async def start_health_server():
     logger.info(f"Health-check server listening on :{PORT}")
 
 
+
+
+def _loop_exception_handler(loop, context):
+    msg = context.get("message", "Unhandled asyncio exception")
+    exc = context.get("exception")
+    if exc:
+        logger.error(f"{msg}: {exc}", exc_info=exc)
+    else:
+        logger.error(msg)
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 async def main():
     # 1. Connect MongoDB first (plugins import database at load time)
@@ -140,6 +150,14 @@ async def main():
 
     # 4. Start bot
     await bot.start()
+
+    # Ensure long polling works even if a webhook was previously configured.
+    try:
+        await bot.delete_webhook(drop_pending_updates=False)
+        logger.info("Webhook cleared; long polling is active.")
+    except Exception as exc:
+        logger.error(f"Failed to clear webhook: {exc}", exc_info=True)
+
     me = await bot.get_me()
     logger.info(f"🤖 Bot started: @{me.username} ({me.id})")
 
@@ -173,4 +191,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.set_exception_handler(_loop_exception_handler)
+    loop.run_until_complete(main())
