@@ -1,23 +1,23 @@
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 
-HELP_TEXT = (
-    "🎬 **OTT Updates Bot — Help**\n\n"
-    "**User commands**\n"
-    "/start — welcome message\n"
-    "/subscribe — subscribe to automatic OTT updates\n"
+HELP = (
+    "🎬 <b>OTT Updates Bot — Help</b>\n\n"
+    "<b>User commands</b>\n"
+    "/start — welcome + quick buttons\n"
+    "/subscribe — subscribe to auto OTT updates\n"
     "/unsubscribe — unsubscribe\n"
-    "/latest — manually fetch the latest new releases\n"
+    "/latest — fetch latest new releases now\n"
     "/platforms — list supported streaming services\n"
-    "/stats — show bot uptime & subscriber count\n"
-    "/about — data sources & credits\n"
-    "/help — show this message\n\n"
-    "**Admin commands** _(set ADMIN\\_ID in .env)_\n"
-    "/broadcast `<message>` — send a message to all subscribers\n"
+    "/stats — uptime &amp; subscriber count\n"
+    "/about — data sources &amp; credits\n"
+    "/help — this message\n\n"
+    "<b>Admin commands</b> <i>(requires ADMIN_ID in .env)</i>\n"
+    "/broadcast &lt;message&gt; — send to all subscribers\n"
     "/sendnow — force an immediate update check"
 )
 
 
 @Client.on_message(filters.command("help"))
 async def help_cmd(client: Client, message: Message):
-    await message.reply_text(HELP_TEXT)
+    await message.reply_text(HELP, parse_mode=enums.ParseMode.HTML)
