@@ -55,10 +55,6 @@ _bad_targets: set[int | str] = set()
 async def send_updates():
     """Fetch new OTT releases and push them to all subscribers / channels."""
     logger.info("⏰ Scheduled job: checking for new releases …")
-    items = await get_new_releases(days_back=7)
-    if not items:
-        logger.info("No new releases found this cycle.")
-        return
 
     chat_ids: set[int | str] = set()
     if CHAT_ID:
@@ -84,9 +80,14 @@ async def send_updates():
         logger.info("No subscribers or CHAT_ID configured — skipping send.")
         return
 
+    items = await get_new_releases(days_back=7)
+    if not items:
+        logger.info("No new releases found this cycle.")
+        return
+
     sent = 0
     for cid in chat_ids:
-        for item in items:
+        for item in items[:10]:
             try:
                 poster = item.get("poster", "")
                 text   = format_item_message(item)
@@ -152,7 +153,7 @@ async def main():
         await init_db()
 
         # 2. Schedule periodic updates
-        first_run = datetime.utcnow() + timedelta(seconds=20)
+        first_run = datetime.utcnow() + timedelta(minutes=10)
         scheduler.add_job(
             send_updates,
             "interval",
@@ -207,8 +208,14 @@ async def main():
                     targets.add(int(cid) if cid.lstrip("-").isdigit() else cid)
             for cid in targets:
                 for item in warm_items:
-                    text = format_item_message(item)
-                    await bot.send_message(cid, text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=False)
+                    try:
+                        text = format_item_message(item)
+                        await bot.send_message(cid, text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=False)
+                    except Exception as exc:
+                        logger.warning(f"Startup send failed for {cid}: {exc}")
+                        if "Peer id invalid" in str(exc):
+                            _bad_targets.add(cid)
+                            break
         except Exception as exc:
             logger.warning(f"Startup last-10 send skipped: {exc}")
 
