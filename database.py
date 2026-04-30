@@ -2,10 +2,9 @@
 database.py — MongoDB backend for OTT Updates Bot.
 
 Collections:
-  subscribers  – { chat_id, username, subscribed_at }
-  sent_items   – { item_id, title, sent_at }
+  subscribers  – { chat_id, username, auto_send, subscribed_at }
+  sent_items   – { item_id, title, sent_at }   ← TTL-indexed, auto-purged after 30 days
 """
-
 import logging
 from datetime import datetime, timezone
 from typing import List
@@ -28,7 +27,11 @@ def get_db():
 async def init_db() -> None:
     """Connect to MongoDB and ensure indexes exist."""
     global _client, _db
-    _client = AsyncIOMotorClient(MONGO_URI)
+
+    _client = AsyncIOMotorClient(
+        MONGO_URI,
+        serverSelectionTimeoutMS=10_000,   # fail fast on bad URI
+    )
     _db = _client[MONGO_DB_NAME]
 
     # Ensure indexes
@@ -36,17 +39,19 @@ async def init_db() -> None:
     await _db.sent_items.create_index("item_id", unique=True)
     await _db.sent_items.create_index(
         [("sent_at", ASCENDING)],
-        expireAfterSeconds=30 * 24 * 3600,   # auto-purge sent_items after 30 days
+        expireAfterSeconds=30 * 24 * 3600,  # auto-purge after 30 days
     )
 
-    # Ping to verify connection
+    # Verify connectivity
     await _client.admin.command("ping")
     logger.info(f"✅ MongoDB connected → {MONGO_DB_NAME}")
 
 
 async def close_db() -> None:
+    global _client
     if _client:
         _client.close()
+        _client = None
 
 
 # ─── Subscribers ──────────────────────────────────────────────────────────────
@@ -63,7 +68,7 @@ async def add_subscriber(chat_id: int, username: str = "") -> bool:
             }},
             upsert=True,
         )
-        return result.upserted_id is not None   # True only on fresh insert
+        return result.upserted_id is not None
     except Exception as exc:
         logger.error(f"add_subscriber error: {exc}")
         return False
@@ -108,11 +113,13 @@ async def is_subscriber(chat_id: int) -> bool:
 # ─── Sent-items dedup ─────────────────────────────────────────────────────────
 
 async def is_item_sent(item_id: str) -> bool:
+    """Return True if this item has already been broadcast."""
     doc = await _db.sent_items.find_one({"item_id": item_id}, {"_id": 1})
     return doc is not None
 
 
 async def mark_item_sent(item_id: str, title: str = "") -> None:
+    """Record that this item has been sent so future cycles skip it."""
     await _db.sent_items.update_one(
         {"item_id": item_id},
         {"$setOnInsert": {
