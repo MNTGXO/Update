@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from aiohttp import web
 from dotenv import load_dotenv
 from pyrogram import Client, idle, enums
+from pyrogram.types import BotCommand
+from pyrogram.raw.functions.bots import DeleteWebhook
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import init_db, close_db, get_subscribers
@@ -153,10 +155,25 @@ async def main():
 
     # Ensure long polling works even if a webhook was previously configured.
     try:
-        await bot.delete_webhook(drop_pending_updates=False)
-        logger.info("Webhook cleared; long polling is active.")
+        await bot.invoke(DeleteWebhook(drop_pending_updates=False))
+        logger.info("Webhook cleared via raw API; long polling is active.")
     except Exception as exc:
         logger.error(f"Failed to clear webhook: {exc}", exc_info=True)
+
+    # Register command hints shown by Telegram clients.
+    try:
+        await bot.set_bot_commands([
+            BotCommand("start", "Start the bot"),
+            BotCommand("help", "Show help"),
+            BotCommand("subscribe", "Subscribe to auto updates"),
+            BotCommand("unsubscribe", "Unsubscribe from updates"),
+            BotCommand("latest", "Get latest releases now"),
+            BotCommand("platforms", "Show supported platforms"),
+            BotCommand("stats", "Show bot statistics"),
+            BotCommand("about", "About this bot"),
+        ])
+    except Exception as exc:
+        logger.warning(f"Failed to register bot commands: {exc}")
 
     me = await bot.get_me()
     logger.info(f"🤖 Bot started: @{me.username} ({me.id})")
