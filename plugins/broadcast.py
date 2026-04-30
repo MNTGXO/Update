@@ -1,75 +1,83 @@
 import asyncio
 import logging
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 
-from config import ADMIN_ID
+from config import ADMIN_ID, CHAT_ID
 from database import get_subscribers
+from utils import get_new_releases, format_item_message
 
 logger = logging.getLogger("OTTBot.broadcast")
 
+
+# ─── Admin filter ─────────────────────────────────────────────────────────────
 
 def _is_admin(_, __, message: Message) -> bool:
     if not ADMIN_ID:
         return False
     try:
-        return message.from_user and message.from_user.id == int(ADMIN_ID)
+        return bool(message.from_user and message.from_user.id == int(ADMIN_ID))
     except (ValueError, TypeError):
         return False
 
 
-admin_filter = filters.create(_is_admin)
+admin_only = filters.create(_is_admin)
 
 
-@Client.on_message(filters.command("broadcast") & admin_filter)
+# ─── /broadcast ───────────────────────────────────────────────────────────────
+
+@Client.on_message(filters.command("broadcast") & admin_only)
 async def broadcast(client: Client, message: Message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.reply_text("Usage: /broadcast `<message>`\n\nExample:\n/broadcast Netflix just dropped something big! 🔥")
+        await message.reply_text(
+            "Usage: /broadcast <code>&lt;message&gt;</code>\n\n"
+            "Example:\n<code>/broadcast Netflix just dropped something big! 🔥</code>",
+            parse_mode=enums.ParseMode.HTML,
+        )
         return
 
     msg_text = parts[1]
-    subs = get_subscribers()
-
+    subs = await get_subscribers()
     if not subs:
         await message.reply_text("⚠️ No subscribers to broadcast to.")
         return
 
-    status = await message.reply_text(f"📢 Broadcasting to {len(subs)} subscriber(s)…")
-
-    success, failed = 0, 0
+    status = await message.reply_text(f"📢 Broadcasting to <b>{len(subs)}</b> subscriber(s)…",
+                                      parse_mode=enums.ParseMode.HTML)
+    success = failed = 0
     for cid in subs:
         try:
             await client.send_message(
                 cid,
-                f"📢 **Announcement**\n\n{msg_text}",
+                f"📢 <b>Announcement</b>\n\n{msg_text}",
+                parse_mode=enums.ParseMode.HTML,
                 disable_web_page_preview=True,
             )
             success += 1
-            await asyncio.sleep(0.05)   # ~20 msg/s — within Telegram limits
+            await asyncio.sleep(0.05)
         except Exception as exc:
             failed += 1
             logger.warning(f"Broadcast failed → {cid}: {exc}")
 
     await status.edit_text(
-        f"✅ Broadcast complete.\n\n"
-        f"• Delivered: **{success}**\n"
-        f"• Failed: **{failed}**"
+        f"✅ <b>Broadcast complete.</b>\n\n"
+        f"• Delivered: <b>{success}</b>\n"
+        f"• Failed:    <b>{failed}</b>",
+        parse_mode=enums.ParseMode.HTML,
     )
 
 
-@Client.on_message(filters.command("sendnow") & admin_filter)
-async def sendnow(client: Client, message: Message):
-    """Force an immediate update check (admin only)."""
-    from utils import get_new_releases, format_item_message
-    from config import CHAT_ID
+# ─── /sendnow ─────────────────────────────────────────────────────────────────
 
+@Client.on_message(filters.command("sendnow") & admin_only)
+async def sendnow(client: Client, message: Message):
     status = await message.reply_text("⚡ Forcing update check now…")
-    items = await get_new_releases(days_back=7)
+    items  = await get_new_releases(days_back=7)
 
     if not items:
-        await status.edit_text("No new releases found right now.")
+        await status.edit_text("ℹ️ No new releases found right now.")
         return
 
     chat_ids: set[int] = set()
@@ -79,16 +87,34 @@ async def sendnow(client: Client, message: Message):
             if cid:
                 chat_ids.add(int(cid))
     else:
-        chat_ids.update(get_subscribers())
+        chat_ids.update(await get_subscribers())
+
+    if not chat_ids:
+        await status.edit_text("⚠️ No subscribers or CHAT_ID configured.")
+        return
 
     sent = 0
     for cid in chat_ids:
         for item in items:
             try:
-                await client.send_message(cid, format_item_message(item), disable_web_page_preview=False)
+                text   = format_item_message(item)
+                poster = item.get("poster", "")
+                if poster:
+                    try:
+                        await client.send_photo(cid, poster, caption=text,
+                                                parse_mode=enums.ParseMode.HTML)
+                    except Exception:
+                        await client.send_message(cid, text,
+                                                  parse_mode=enums.ParseMode.HTML)
+                else:
+                    await client.send_message(cid, text,
+                                              parse_mode=enums.ParseMode.HTML)
                 sent += 1
                 await asyncio.sleep(0.5)
             except Exception as exc:
                 logger.warning(f"sendnow failed → {cid}: {exc}")
 
-    await status.edit_text(f"✅ Sent **{sent}** message(s) to **{len(chat_ids)}** chat(s).")
+    await status.edit_text(
+        f"✅ Sent <b>{sent}</b> message(s) to <b>{len(chat_ids)}</b> chat(s).",
+        parse_mode=enums.ParseMode.HTML,
+    )
