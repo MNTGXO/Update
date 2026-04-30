@@ -1,6 +1,5 @@
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, CallbackQuery
-from config import CHAT_ID
 from database import remove_subscriber, is_subscriber
 
 
@@ -16,13 +15,6 @@ async def unsubscribe_cb(client: Client, cb: CallbackQuery):
 
 
 async def _unsubscribe(chat_id: int, reply_fn):
-    if CHAT_ID:
-        await reply_fn(
-            "ℹ️ This bot is in channel-broadcast mode.\n"
-            "Individual subscriptions are disabled.",
-            parse_mode=enums.ParseMode.HTML,
-        )
-        return
     if not await is_subscriber(chat_id):
         await reply_fn(
             "ℹ️ You are <b>not subscribed</b>.\n"
