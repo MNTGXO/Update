@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import aiohttp
+from bs4 import BeautifulSoup
 
 from config import JUSTWATCH_COUNTRY, TMDB_API_KEY
 from database import is_item_sent, mark_item_sent
@@ -76,7 +77,7 @@ async def _tmdb_providers(session: aiohttp.ClientSession,
     return seen
 
 
-async def _fetch_tmdb(days_back: int) -> List[Dict[str, Any]]:
+async def _fetch_tmdb(days_back: int, dedup: bool = True) -> List[Dict[str, Any]]:
     since = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     results = []
@@ -108,7 +109,7 @@ async def _fetch_tmdb(days_back: int) -> List[Dict[str, Any]]:
                 if isinstance(providers, Exception) or not providers:
                     continue
                 item_id = f"tmdb_{mt}_{item['id']}"
-                if await is_item_sent(item_id):
+                if dedup and await is_item_sent(item_id):
                     continue
 
                 title    = item.get("title") or item.get("name") or "Unknown"
@@ -117,7 +118,8 @@ async def _fetch_tmdb(days_back: int) -> List[Dict[str, Any]]:
                 poster   = item.get("poster_path", "")
                 rating   = round(item.get("vote_average", 0), 1)
 
-                await mark_item_sent(item_id, title)
+                if dedup:
+                    await mark_item_sent(item_id, title)
                 results.append({
                     "id":           item["id"],
                     "item_id":      item_id,
@@ -138,14 +140,16 @@ async def _fetch_tmdb(days_back: int) -> List[Dict[str, Any]]:
 
 JW_GQL_URL = "https://apis.justwatch.com/graphql"
 
-JW_QUERY = """
-query GetNewContent($country: Country!, $language: Language!, $after: String) {
-  newContent(
+JW_QUERY_POPULAR = """
+query GetPopularTitles($country: Country!, $language: Language!) {
+  popularTitles(
     country: $country
-    language: $language
     first: 40
-    after: $after
-    filter: { objectTypes: [MOVIE, SHOW] }
+    sortBy: POPULAR
+    filter: {
+      objectTypes: [MOVIE, SHOW]
+      monetizationTypes: [FLATRATE, FREE, ADS]
+    }
   ) {
     edges {
       node {
@@ -156,13 +160,6 @@ query GetNewContent($country: Country!, $language: Language!, $after: String) {
           shortDescription
           originalReleaseYear
           posterUrl
-        }
-        watchNowOffer(
-          country: $country
-          platform: WEB
-          filter: { monetizationTypes: [FLATRATE, FREE, ADS] }
-        ) {
-          package { clearName shortName }
         }
         offers(
           country: $country
@@ -178,7 +175,7 @@ query GetNewContent($country: Country!, $language: Language!, $after: String) {
 """
 
 
-async def _fetch_justwatch(days_back: int) -> List[Dict[str, Any]]:
+async def _fetch_justwatch(days_back: int, dedup: bool = True) -> List[Dict[str, Any]]:
     results = []
     country_code = JUSTWATCH_COUNTRY.upper()   # e.g. "IN"
 
@@ -188,7 +185,7 @@ async def _fetch_justwatch(days_back: int) -> List[Dict[str, Any]]:
         "Accept":        "application/json",
     }
     payload = {
-        "query":     JW_QUERY,
+        "query":     JW_QUERY_POPULAR,
         "variables": {
             "country":  country_code,
             "language": "en",
@@ -211,7 +208,11 @@ async def _fetch_justwatch(days_back: int) -> List[Dict[str, Any]]:
             logger.error(f"JustWatch GraphQL error: {exc}")
             return []
 
-    edges = data.get("data", {}).get("newContent", {}).get("edges", [])
+    if data.get("errors"):
+        logger.warning(f"JustWatch GraphQL errors: {json.dumps(data['errors'])[:300]}")
+        return []
+
+    edges = data.get("data", {}).get("popularTitles", {}).get("edges", [])
     logger.info(f"JustWatch GraphQL → {len(edges)} edge(s)")
 
     for edge in edges:
@@ -234,7 +235,7 @@ async def _fetch_justwatch(days_back: int) -> List[Dict[str, Any]]:
         jw_id    = node.get("id", "")
         item_id  = f"jw_{jw_id}"
 
-        if await is_item_sent(item_id):
+        if dedup and await is_item_sent(item_id):
             continue
 
         title    = content.get("title") or "Unknown"
@@ -244,8 +245,11 @@ async def _fetch_justwatch(days_back: int) -> List[Dict[str, Any]]:
         # JustWatch poster URL template
         if poster and "{profile}" in poster:
             poster = poster.replace("{profile}", "s592").replace("{format}", "jpg")
+        if poster.startswith("/"):
+            poster = f"https://images.justwatch.com{poster}"
 
-        await mark_item_sent(item_id, title)
+        if dedup:
+            await mark_item_sent(item_id, title)
         results.append({
             "id":           jw_id,
             "item_id":      item_id,
@@ -262,15 +266,69 @@ async def _fetch_justwatch(days_back: int) -> List[Dict[str, Any]]:
     return results
 
 
+async def _fetch_justwatch_web(dedup: bool = True) -> List[Dict[str, Any]]:
+    """Scrape JustWatch /new page as fallback source."""
+    url = f"https://www.justwatch.com/{JUSTWATCH_COUNTRY.lower()}/new"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; OTTBot/3.0)"}
+    results: List[Dict[str, Any]] = []
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status != 200:
+                    logger.warning(f"JustWatch web scrape HTTP {r.status}")
+                    return []
+                html = await r.text()
+        except Exception as exc:
+            logger.error(f"JustWatch web scrape error: {exc}")
+            return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    for block in soup.select("div.timeline__provider-block"):
+        logo = block.select_one(".provider-timeline__logo img")
+        provider = (logo.get("alt", "") if logo else "").strip() or "Unknown"
+        for item in block.select(".horizontal-title-list__item"):
+            a = item.select_one("a[href]")
+            img = item.select_one(".title-poster__image img")
+            if not a or not img:
+                continue
+            href = a.get("href", "")
+            title = (img.get("alt", "") or "Unknown").strip()
+            poster = (img.get("src", "") or "").strip()
+            item_id = f"jw_web_{href}"
+            if dedup and await is_item_sent(item_id):
+                continue
+            if dedup:
+                await mark_item_sent(item_id, title)
+
+            results.append({
+                "id": href,
+                "item_id": item_id,
+                "type": "tv" if "/tv-show/" in href else "movie",
+                "title": title,
+                "release_date": "Today",
+                "overview": f"New on {provider}",
+                "providers": [provider],
+                "poster": poster,
+                "rating": 0,
+                "genre_ids": [],
+            })
+
+    logger.info(f"JustWatch web scrape → {len(results)} item(s)")
+    return results
+
+
 # ─── Public API ───────────────────────────────────────────────────────────────
 
-async def get_new_releases(days_back: int = 7) -> List[Dict[str, Any]]:
+async def get_new_releases(days_back: int = 7, dedup: bool = True) -> List[Dict[str, Any]]:
     if TMDB_API_KEY:
         logger.info("Fetching via TMDB API …")
-        items = await _fetch_tmdb(days_back)
+        items = await _fetch_tmdb(days_back, dedup=dedup)
     else:
-        logger.info("No TMDB_API_KEY — using JustWatch GraphQL …")
-        items = await _fetch_justwatch(days_back)
+        logger.info("No TMDB_API_KEY — using JustWatch web/GraphQL fallback …")
+        items = await _fetch_justwatch_web(dedup=dedup)
+        if not items:
+            items = await _fetch_justwatch(days_back, dedup=dedup)
 
     logger.info(f"get_new_releases → {len(items)} new item(s)")
     return items
