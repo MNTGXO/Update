@@ -32,17 +32,17 @@ PLATFORMS = (
 KB = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Subscribe", callback_data="subscribe"), InlineKeyboardButton("❌ Unsubscribe", callback_data="unsubscribe")]])
 
 
-@Client.on_message(filters.command("start") & filters.private)
+@Client.on_message(filters.command("start"))
 async def start(client: Client, message: Message):
     await message.reply_text(WELCOME, parse_mode=enums.ParseMode.HTML, reply_markup=KB)
 
 
-@Client.on_message(filters.command("help") & filters.private)
+@Client.on_message(filters.command("help"))
 async def help_cmd(client: Client, message: Message):
     await message.reply_text(HELP, parse_mode=enums.ParseMode.HTML)
 
 
-@Client.on_message(filters.command("about") & filters.private)
+@Client.on_message(filters.command("about"))
 async def about_cmd(client: Client, message: Message):
     await message.reply_text(ABOUT, parse_mode=enums.ParseMode.HTML)
 
@@ -53,7 +53,7 @@ async def about_cb(client: Client, cb: CallbackQuery):
     await cb.message.reply_text(ABOUT, parse_mode=enums.ParseMode.HTML)
 
 
-@Client.on_message(filters.command("platforms") & filters.private)
+@Client.on_message(filters.command("platforms"))
 async def platforms(client: Client, message: Message):
     await message.reply_text(PLATFORMS.format(country=JUSTWATCH_COUNTRY), parse_mode=enums.ParseMode.HTML)
 

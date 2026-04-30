@@ -186,10 +186,16 @@ async def main():
 
         # Send last discovered 10 releases on each restart to admin / configured chats.
         try:
-            warm_items = (await get_new_releases(days_back=7))[:10]
-            targets: set[int | str] = set(await get_subscribers())
+            warm_items = (await get_new_releases(days_back=7, dedup=False))[:10]
+            targets: set[int | str] = set()
             if ADMIN_ID:
                 targets.add(int(ADMIN_ID))
+            if CHAT_ID:
+                for raw in str(CHAT_ID).split(","):
+                    cid = raw.strip()
+                    if not cid:
+                        continue
+                    targets.add(int(cid) if cid.lstrip("-").isdigit() else cid)
             for cid in targets:
                 for item in warm_items:
                     text = format_item_message(item)
