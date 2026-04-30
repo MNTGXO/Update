@@ -6,7 +6,7 @@ from pyrogram.types import Message
 
 from config import ADMIN_ID, CHAT_ID
 from database import get_subscribers
-from utils import get_new_releases, format_item_message
+from utils import get_new_releases, format_item_message, format_item_keyboard
 
 logger = logging.getLogger("OTTBot.broadcast")
 
@@ -80,14 +80,21 @@ async def sendnow(client: Client, message: Message):
         await status.edit_text("ℹ️ No new releases found right now.")
         return
 
-    chat_ids: set[int] = set()
+    chat_ids: set[int | str] = set()
     if CHAT_ID:
-        for cid in str(CHAT_ID).split(","):
-            cid = cid.strip()
-            if cid:
+        for raw in str(CHAT_ID).split(","):
+            cid = raw.strip()
+            if not cid:
+                continue
+            if cid.startswith("@"):
+                chat_ids.add(cid)
+                continue
+            try:
                 chat_ids.add(int(cid))
-    else:
-        chat_ids.update(await get_subscribers())
+            except ValueError:
+                logger.warning(f"Invalid CHAT_ID value skipped: {cid}")
+
+    chat_ids.update(await get_subscribers())
 
     if not chat_ids:
         await status.edit_text("⚠️ No subscribers or CHAT_ID configured.")
@@ -102,13 +109,16 @@ async def sendnow(client: Client, message: Message):
                 if poster:
                     try:
                         await client.send_photo(cid, poster, caption=text,
-                                                parse_mode=enums.ParseMode.HTML)
+                                                parse_mode=enums.ParseMode.HTML,
+                                                reply_markup=format_item_keyboard(item))
                     except Exception:
                         await client.send_message(cid, text,
-                                                  parse_mode=enums.ParseMode.HTML)
+                                                  parse_mode=enums.ParseMode.HTML,
+                                                  reply_markup=format_item_keyboard(item))
                 else:
                     await client.send_message(cid, text,
-                                              parse_mode=enums.ParseMode.HTML)
+                                              parse_mode=enums.ParseMode.HTML,
+                                              reply_markup=format_item_keyboard(item))
                 sent += 1
                 await asyncio.sleep(0.5)
             except Exception as exc:

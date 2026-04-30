@@ -4,7 +4,7 @@ import logging
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, CallbackQuery
 
-from utils import get_new_releases, format_item_message
+from utils import get_new_releases, format_item_message, format_item_keyboard
 
 logger = logging.getLogger("OTTBot.latest")
 
@@ -50,15 +50,18 @@ async def _latest(client: Client, chat_id: int, reply_fn):
             if poster:
                 try:
                     await client.send_photo(chat_id, poster, caption=text,
-                                            parse_mode=enums.ParseMode.HTML)
+                                            parse_mode=enums.ParseMode.HTML,
+                                            reply_markup=format_item_keyboard(item))
                 except Exception:
                     await client.send_message(chat_id, text,
                                               parse_mode=enums.ParseMode.HTML,
-                                              disable_web_page_preview=False)
+                                              disable_web_page_preview=False,
+                                              reply_markup=format_item_keyboard(item))
             else:
                 await client.send_message(chat_id, text,
                                           parse_mode=enums.ParseMode.HTML,
-                                          disable_web_page_preview=False)
+                                          disable_web_page_preview=False,
+                                          reply_markup=format_item_keyboard(item))
             sent += 1
             await asyncio.sleep(0.6)
         except Exception as exc:

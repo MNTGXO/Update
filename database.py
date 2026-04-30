@@ -80,6 +80,22 @@ async def get_subscribers() -> List[int]:
     return [doc["chat_id"] async for doc in cursor]
 
 
+async def set_auto_send(chat_id: int, enabled: bool) -> None:
+    await _db.subscribers.update_one(
+        {"chat_id": chat_id},
+        {"$set": {"auto_send": enabled}},
+        upsert=True,
+    )
+
+
+async def get_auto_send_subscribers() -> List[int]:
+    cursor = _db.subscribers.find(
+        {"$or": [{"auto_send": {"$exists": False}}, {"auto_send": True}]},
+        {"chat_id": 1, "_id": 0},
+    )
+    return [doc["chat_id"] async for doc in cursor]
+
+
 async def get_subscriber_count() -> int:
     return await _db.subscribers.count_documents({})
 
