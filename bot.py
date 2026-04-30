@@ -58,14 +58,23 @@ async def send_updates():
         logger.info("No new releases found this cycle.")
         return
 
-    chat_ids: set[int] = set()
+    chat_ids: set[int | str] = set()
     if CHAT_ID:
-        for cid in str(CHAT_ID).split(","):
-            cid = cid.strip()
-            if cid:
+        for raw in str(CHAT_ID).split(","):
+            cid = raw.strip()
+            if not cid:
+                continue
+            if cid.startswith("@"):
+                chat_ids.add(cid)
+                continue
+            try:
                 chat_ids.add(int(cid))
-    else:
-        chat_ids.update(await get_subscribers())
+            except ValueError:
+                logger.warning(f"Invalid CHAT_ID value skipped: {cid}")
+
+    # Keep per-user subscribers active even when CHAT_ID is configured.
+    # This avoids disabling commands if a channel ID is wrong/unreachable.
+    chat_ids.update(await get_subscribers())
 
     if not chat_ids:
         logger.info("No subscribers or CHAT_ID configured — skipping send.")

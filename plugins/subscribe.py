@@ -1,6 +1,5 @@
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, CallbackQuery
-from config import CHAT_ID
 from database import add_subscriber, is_subscriber
 
 
@@ -22,13 +21,6 @@ async def subscribe_cb(client: Client, cb: CallbackQuery):
 
 
 async def _subscribe(chat_id: int, username: str, reply_fn):
-    if CHAT_ID:
-        await reply_fn(
-            "ℹ️ This bot is in channel-broadcast mode.\n"
-            "Individual subscriptions are disabled.",
-            parse_mode=enums.ParseMode.HTML,
-        )
-        return
     if await is_subscriber(chat_id):
         await reply_fn(
             "✅ You're <b>already subscribed!</b>\n"
