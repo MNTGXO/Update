@@ -56,11 +56,7 @@ _bad_targets: set[int | str] = set()
 
 
 # ─── Scheduled job ────────────────────────────────────────────────────────────
-async def send_updates() -> None:
-    """Fetch new OTT releases and push them to all subscribers / channels."""
-    logger.info("⏰ Scheduled job: checking for new releases …")
-
-    # Collect target chat IDs
+def _collect_targets() -> set[int | str]:
     chat_ids: set[int | str] = set()
     if CHAT_ID:
         for raw in str(CHAT_ID).split(","):
@@ -74,7 +70,15 @@ async def send_updates() -> None:
                     chat_ids.add(int(cid))
                 except ValueError:
                     logger.warning(f"Invalid CHAT_ID value skipped: {cid}")
+    return chat_ids
 
+
+async def send_updates() -> None:
+    """Fetch new OTT releases and push item details to all subscribers / channels."""
+    logger.info("⏰ Scheduled job: checking for new releases …")
+
+    # Collect target chat IDs
+    chat_ids = _collect_targets()
     chat_ids.update(await get_auto_send_subscribers())
     chat_ids = {cid for cid in chat_ids if cid not in _bad_targets}
 
@@ -154,6 +158,60 @@ async def send_updates() -> None:
     logger.info(f"✅ Sent {sent_total} message(s) across {len(chat_ids)} chat(s).")
 
 
+async def send_daily_latest_list() -> None:
+    """At end of day, send one compact list of today's new releases to all subscribers."""
+    logger.info("🌙 Daily digest: preparing today's release list …")
+
+    chat_ids = _collect_targets()
+    chat_ids.update(await get_auto_send_subscribers())
+    chat_ids = {cid for cid in chat_ids if cid not in _bad_targets}
+
+    if not chat_ids:
+        logger.info("No subscribers or CHAT_ID configured — skipping daily digest.")
+        return
+
+    items = await get_new_releases(days_back=1, dedup=False)
+    if not items:
+        logger.info("Daily digest: no new releases today.")
+        return
+
+    movies = [i for i in items if i.get("type") == "movie"]
+    series = [i for i in items if i.get("type") == "tv"]
+
+    lines = [
+        "🍿 <b>Daily Latest Releases</b>",
+        f"📅 <b>Date (UTC):</b> {datetime.utcnow().strftime('%Y-%m-%d')}",
+        f"🎬 Movies: <b>{len(movies)}</b>  |  📺 Series: <b>{len(series)}</b>",
+        "",
+    ]
+
+    for idx, item in enumerate(items[:40], start=1):
+        icon = "🎬" if item.get("type") == "movie" else "📺"
+        title = item.get("title", "Unknown")
+        lines.append(f"{idx}. {icon} {title}")
+
+    if len(items) > 40:
+        lines.append("")
+        lines.append(f"…and {len(items) - 40} more")
+
+    text = "\n".join(lines)
+
+    sent = 0
+    for cid in chat_ids:
+        try:
+            await bot.send_message(cid, text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
+            sent += 1
+            await asyncio.sleep(0.3)
+        except Exception as exc:
+            logger.warning(f"Daily digest send failed for {cid}: {exc}")
+            if "Peer id invalid" in str(exc):
+                _bad_targets.add(cid)
+                if isinstance(cid, int):
+                    await remove_subscriber(cid)
+
+    logger.info(f"✅ Daily digest sent to {sent}/{len(chat_ids)} target(s).")
+
+
 # ─── Health-check HTTP server ─────────────────────────────────────────────────
 async def _health(request):
     return web.Response(text="OK")
@@ -213,9 +271,17 @@ async def main() -> None:
             id="send_updates",
             misfire_grace_time=300,
         )
+        scheduler.add_job(
+            send_daily_latest_list,
+            "cron",
+            hour=23,
+            minute=55,
+            id="daily_latest_list",
+            misfire_grace_time=1800,
+        )
         scheduler.start()
         scheduler_started = True
-        logger.info(f"Scheduler started — updates every {UPDATE_INTERVAL_HOURS}h")
+        logger.info(f"Scheduler started — updates every {UPDATE_INTERVAL_HOURS}h + daily digest at 23:55 UTC")
 
         # 4. Health-check server (background)
         asyncio.create_task(start_health_server())
