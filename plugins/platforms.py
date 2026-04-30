@@ -1,15 +1,16 @@
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 from config import JUSTWATCH_COUNTRY
 
-PLATFORMS_TEXT = (
-    "📡 **Supported OTT Platforms**\n\n"
+TEXT = (
+    "📡 <b>Supported OTT Platforms</b>\n"
+    "<i>Region: <code>{country}</code></i>\n\n"
     "🔴 Netflix\n"
     "🔵 Amazon Prime Video\n"
     "🟣 Disney+\n"
-    "🟠 Hotstar\n"
+    "🟠 JioCinema / Hotstar\n"
     "⚪ Apple TV+\n"
-    "🔵 HBO Max / Max\n"
+    "🔵 Max (HBO Max)\n"
     "🟢 Hulu\n"
     "🟡 Peacock\n"
     "🔴 Paramount+\n"
@@ -17,16 +18,14 @@ PLATFORMS_TEXT = (
     "🟢 ZEE5\n"
     "⚫ MX Player\n"
     "🟣 Crunchyroll\n"
-    "⚪ MUBI\n\n"
-    "📍 **Your region:** `{country}`\n\n"
-    "_Availability varies by region. "
-    "The bot only notifies you about content available in your configured country._"
+    "⚪ MUBI\n"
+    "🟤 Starz\n\n"
+    "<i>Availability depends on your configured region.\n"
+    "Only content streamable in your region is shown.</i>"
 )
 
 
 @Client.on_message(filters.command("platforms"))
 async def platforms(client: Client, message: Message):
-    await message.reply_text(
-        PLATFORMS_TEXT.format(country=JUSTWATCH_COUNTRY),
-        disable_web_page_preview=True,
-    )
+    await message.reply_text(TEXT.format(country=JUSTWATCH_COUNTRY),
+                             parse_mode=enums.ParseMode.HTML)
