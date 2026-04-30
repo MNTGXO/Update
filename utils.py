@@ -283,36 +283,40 @@ async def _fetch_justwatch_web(dedup: bool = True) -> List[Dict[str, Any]]:
             logger.error(f"JustWatch web scrape error: {exc}")
             return []
 
-    soup = BeautifulSoup(html, "html.parser")
-    for block in soup.select("div.timeline__provider-block"):
-        logo = block.select_one(".provider-timeline__logo img")
-        provider = (logo.get("alt", "") if logo else "").strip() or "Unknown"
-        for item in block.select(".horizontal-title-list__item"):
-            a = item.select_one("a[href]")
-            img = item.select_one(".title-poster__image img")
-            if not a or not img:
-                continue
-            href = a.get("href", "")
-            title = (img.get("alt", "") or "Unknown").strip()
-            poster = (img.get("src", "") or "").strip()
-            item_id = f"jw_web_{href}"
-            if dedup and await is_item_sent(item_id):
-                continue
-            if dedup:
-                await mark_item_sent(item_id, title)
+    def _parse(raw: str):
+        parsed = []
+        soup = BeautifulSoup(raw, "html.parser")
+        for block in soup.select("div.timeline__provider-block"):
+            logo = block.select_one(".provider-timeline__logo img")
+            provider = (logo.get("alt", "") if logo else "").strip() or "Unknown"
+            for item in block.select(".horizontal-title-list__item"):
+                a = item.select_one("a[href]")
+                img = item.select_one(".title-poster__image img")
+                if not a or not img:
+                    continue
+                parsed.append((a.get("href", ""), (img.get("alt", "") or "Unknown").strip(), (img.get("src", "") or "").strip(), provider))
+        return parsed
 
-            results.append({
-                "id": href,
-                "item_id": item_id,
-                "type": "tv" if "/tv-show/" in href else "movie",
-                "title": title,
-                "release_date": "Today",
-                "overview": f"New on {provider}",
-                "providers": [provider],
-                "poster": poster,
-                "rating": 0,
-                "genre_ids": [],
-            })
+    parsed_items = await asyncio.to_thread(_parse, html)
+    for href, title, poster, provider in parsed_items[:40]:
+        item_id = f"jw_web_{href}"
+        if dedup and await is_item_sent(item_id):
+            continue
+        if dedup:
+            await mark_item_sent(item_id, title)
+
+        results.append({
+            "id": href,
+            "item_id": item_id,
+            "type": "tv" if "/tv-show/" in href else "movie",
+            "title": title,
+            "release_date": "Today",
+            "overview": f"New on {provider}",
+            "providers": [provider],
+            "poster": poster,
+            "rating": 0,
+            "genre_ids": [],
+        })
 
     logger.info(f"JustWatch web scrape → {len(results)} item(s)")
     return results

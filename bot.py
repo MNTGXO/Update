@@ -10,7 +10,7 @@ from pyrogram import Client, idle, enums
 from pyrogram.types import BotCommand
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from database import init_db, close_db, get_subscribers, get_auto_send_subscribers
+from database import init_db, close_db, get_subscribers, get_auto_send_subscribers, remove_subscriber
 from utils import get_new_releases, format_item_message
 from config import UPDATE_INTERVAL_HOURS, CHAT_ID, MONGO_URI, ADMIN_ID, JUSTWATCH_COUNTRY, TMDB_API_KEY, MONGO_DB_NAME
 
@@ -49,15 +49,12 @@ bot = Client(
 
 # ─── Scheduler ────────────────────────────────────────────────────────────────
 scheduler = AsyncIOScheduler(timezone="UTC")
+_bad_targets: set[int | str] = set()
 
 
 async def send_updates():
     """Fetch new OTT releases and push them to all subscribers / channels."""
     logger.info("⏰ Scheduled job: checking for new releases …")
-    items = await get_new_releases(days_back=7)
-    if not items:
-        logger.info("No new releases found this cycle.")
-        return
 
     chat_ids: set[int | str] = set()
     if CHAT_ID:
@@ -77,13 +74,20 @@ async def send_updates():
     # This avoids disabling commands if a channel ID is wrong/unreachable.
     chat_ids.update(await get_auto_send_subscribers())
 
+    chat_ids = {cid for cid in chat_ids if cid not in _bad_targets}
+
     if not chat_ids:
         logger.info("No subscribers or CHAT_ID configured — skipping send.")
         return
 
+    items = await get_new_releases(days_back=7)
+    if not items:
+        logger.info("No new releases found this cycle.")
+        return
+
     sent = 0
     for cid in chat_ids:
-        for item in items:
+        for item in items[:10]:
             try:
                 poster = item.get("poster", "")
                 text   = format_item_message(item)
@@ -104,6 +108,12 @@ async def send_updates():
                 await asyncio.sleep(0.5)
             except Exception as exc:
                 logger.warning(f"Failed to send to {cid}: {exc}")
+                if "Peer id invalid" in str(exc):
+                    _bad_targets.add(cid)
+                    if isinstance(cid, int):
+                        await remove_subscriber(cid)
+                    logger.warning(f"Disabled invalid target: {cid}")
+                    break
 
     logger.info(f"✅ Sent {sent} message(s) to {len(chat_ids)} chat(s).")
 
@@ -143,7 +153,7 @@ async def main():
         await init_db()
 
         # 2. Schedule periodic updates
-        first_run = datetime.utcnow() + timedelta(seconds=20)
+        first_run = datetime.utcnow() + timedelta(minutes=10)
         scheduler.add_job(
             send_updates,
             "interval",
@@ -198,8 +208,14 @@ async def main():
                     targets.add(int(cid) if cid.lstrip("-").isdigit() else cid)
             for cid in targets:
                 for item in warm_items:
-                    text = format_item_message(item)
-                    await bot.send_message(cid, text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=False)
+                    try:
+                        text = format_item_message(item)
+                        await bot.send_message(cid, text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=False)
+                    except Exception as exc:
+                        logger.warning(f"Startup send failed for {cid}: {exc}")
+                        if "Peer id invalid" in str(exc):
+                            _bad_targets.add(cid)
+                            break
         except Exception as exc:
             logger.warning(f"Startup last-10 send skipped: {exc}")
 
