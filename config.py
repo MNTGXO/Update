@@ -5,7 +5,7 @@ import time
 BOT_START_TIME: float = time.time()
 
 # How often to broadcast new releases (hours)
-UPDATE_INTERVAL_HOURS: int = int(os.getenv("UPDATE_INTERVAL_HOURS", "6"))
+UPDATE_INTERVAL_HOURS: int = int(os.getenv("UPDATE_INTERVAL_HOURS", "1"))
 
 # JustWatch / TMDB region settings
 JUSTWATCH_COUNTRY: str  = os.getenv("JUSTWATCH_COUNTRY", "IN").upper()
