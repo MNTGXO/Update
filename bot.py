@@ -134,6 +134,27 @@ async def main():
     me = await bot.get_me()
     logger.info(f"🤖 Bot started: @{me.username} ({me.id})")
 
+    # Notify admin on startup
+    if ADMIN_ID:
+        from config import JUSTWATCH_COUNTRY, TMDB_API_KEY, MONGO_DB_NAME
+        import time
+        source = "TMDB API ✅" if TMDB_API_KEY else "JustWatch GraphQL"
+        try:
+            await bot.send_message(
+                int(ADMIN_ID),
+                f"🟢 <b>Bot Restarted Successfully!</b>\n\n"
+                f"🤖 <b>Username:</b> @{me.username}\n"
+                f"🆔 <b>Bot ID:</b> <code>{me.id}</code>\n"
+                f"🌍 <b>Region:</b> <code>{JUSTWATCH_COUNTRY}</code>\n"
+                f"🗃 <b>Database:</b> <code>{MONGO_DB_NAME}</code>\n"
+                f"📡 <b>Data source:</b> {source}\n"
+                f"🔄 <b>Update interval:</b> every {UPDATE_INTERVAL_HOURS}h\n\n"
+                f"✅ All systems operational.",
+                parse_mode=enums.ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.warning(f"Could not notify admin: {e}")
+
     # 5. Block until killed
     await idle()
 
