@@ -11,7 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import init_db, close_db, get_subscribers
 from utils import get_new_releases, format_item_message
-from config import UPDATE_INTERVAL_HOURS, CHAT_ID, MONGO_URI
+from config import UPDATE_INTERVAL_HOURS, CHAT_ID, MONGO_URI, ADMIN_ID, JUSTWATCH_COUNTRY, TMDB_API_KEY, MONGO_DB_NAME
 
 load_dotenv()
 
@@ -136,8 +136,6 @@ async def main():
 
     # Notify admin on startup
     if ADMIN_ID:
-        from config import JUSTWATCH_COUNTRY, TMDB_API_KEY, MONGO_DB_NAME
-        import time
         source = "TMDB API ✅" if TMDB_API_KEY else "JustWatch GraphQL"
         try:
             await bot.send_message(
