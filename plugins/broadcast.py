@@ -80,14 +80,21 @@ async def sendnow(client: Client, message: Message):
         await status.edit_text("ℹ️ No new releases found right now.")
         return
 
-    chat_ids: set[int] = set()
+    chat_ids: set[int | str] = set()
     if CHAT_ID:
-        for cid in str(CHAT_ID).split(","):
-            cid = cid.strip()
-            if cid:
+        for raw in str(CHAT_ID).split(","):
+            cid = raw.strip()
+            if not cid:
+                continue
+            if cid.startswith("@"):
+                chat_ids.add(cid)
+                continue
+            try:
                 chat_ids.add(int(cid))
-    else:
-        chat_ids.update(await get_subscribers())
+            except ValueError:
+                logger.warning(f"Invalid CHAT_ID value skipped: {cid}")
+
+    chat_ids.update(await get_subscribers())
 
     if not chat_ids:
         await status.edit_text("⚠️ No subscribers or CHAT_ID configured.")
