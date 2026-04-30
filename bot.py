@@ -10,9 +10,16 @@ from pyrogram import Client, idle, enums
 from pyrogram.types import BotCommand
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from database import init_db, close_db, get_subscribers, get_auto_send_subscribers, remove_subscriber
+from database import (
+    init_db, close_db,
+    get_auto_send_subscribers, remove_subscriber,
+    is_item_sent, mark_item_sent,
+)
 from utils import get_new_releases, format_item_message, format_item_keyboard
-from config import UPDATE_INTERVAL_HOURS, CHAT_ID, MONGO_URI, ADMIN_ID, JUSTWATCH_COUNTRY, TMDB_API_KEY, MONGO_DB_NAME
+from config import (
+    UPDATE_INTERVAL_HOURS, CHAT_ID, MONGO_URI, ADMIN_ID,
+    JUSTWATCH_COUNTRY, TMDB_API_KEY, MONGO_DB_NAME,
+)
 
 load_dotenv()
 
@@ -22,8 +29,12 @@ API_HASH  = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT      = int(os.getenv("PORT", "8080"))
 
-missing = [k for k, v in {"BOT_TOKEN": BOT_TOKEN, "API_ID": API_ID,
-                           "API_HASH": API_HASH, "MONGO_URI": MONGO_URI}.items() if not v]
+missing = [k for k, v in {
+    "BOT_TOKEN": BOT_TOKEN,
+    "API_ID":    API_ID,
+    "API_HASH":  API_HASH,
+    "MONGO_URI": MONGO_URI,
+}.items() if not v]
 if missing:
     print(f"ERROR: Missing required env vars: {', '.join(missing)}")
     sys.exit(1)
@@ -36,26 +47,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("OTTBot")
 
-# ─── Pyrogram Client ──────────────────────────────────────────────────────────
-# parse_mode=HTML so plugins can use <b>, <i>, <code> without escaping issues
-bot = Client(
-    "ott_bot",
-    api_id=int(API_ID),
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    plugins=dict(root="plugins"),
-    parse_mode=enums.ParseMode.HTML,
-)
-
-# ─── Scheduler ────────────────────────────────────────────────────────────────
+# ─── Globals set inside main() ────────────────────────────────────────────────
+# bot is NOT created at module level — doing so captures the wrong event loop
+# and causes "Future attached to a different loop" on Pyrogram's SQLite storage.
+bot: Client | None = None
 scheduler = AsyncIOScheduler(timezone="UTC")
 _bad_targets: set[int | str] = set()
 
 
-async def send_updates():
+# ─── Scheduled job ────────────────────────────────────────────────────────────
+async def send_updates() -> None:
     """Fetch new OTT releases and push them to all subscribers / channels."""
     logger.info("⏰ Scheduled job: checking for new releases …")
 
+    # Collect target chat IDs
     chat_ids: set[int | str] = set()
     if CHAT_ID:
         for raw in str(CHAT_ID).split(","):
@@ -64,51 +69,75 @@ async def send_updates():
                 continue
             if cid.startswith("@"):
                 chat_ids.add(cid)
-                continue
-            try:
-                chat_ids.add(int(cid))
-            except ValueError:
-                logger.warning(f"Invalid CHAT_ID value skipped: {cid}")
+            else:
+                try:
+                    chat_ids.add(int(cid))
+                except ValueError:
+                    logger.warning(f"Invalid CHAT_ID value skipped: {cid}")
 
-    # Keep per-user subscribers active even when CHAT_ID is configured.
-    # This avoids disabling commands if a channel ID is wrong/unreachable.
     chat_ids.update(await get_auto_send_subscribers())
-
     chat_ids = {cid for cid in chat_ids if cid not in _bad_targets}
 
     if not chat_ids:
         logger.info("No subscribers or CHAT_ID configured — skipping send.")
         return
 
-    items = await get_new_releases(days_back=7)
-    if not items:
+    all_items = await get_new_releases(days_back=7)
+    if not all_items:
         logger.info("No new releases found this cycle.")
         return
 
-    sent = 0
+    # ── Dedup: skip items already sent ────────────────────────────────────────
+    new_items = []
+    for item in all_items:
+        item_id = str(item.get("id") or item.get("tmdb_id") or item.get("title", ""))
+        if not item_id:
+            continue
+        if await is_item_sent(item_id):
+            logger.debug(f"Skipping already-sent item: {item.get('title')} ({item_id})")
+            continue
+        new_items.append((item_id, item))
+
+    if not new_items:
+        logger.info("All releases already sent — nothing new.")
+        return
+
+    logger.info(f"Found {len(new_items)} new item(s) to send.")
+
+    sent_total = 0
     for cid in chat_ids:
-        for item in items[:10]:
+        for item_id, item in new_items[:10]:
             try:
                 poster = item.get("poster", "")
                 text   = format_item_message(item)
+                kb     = format_item_keyboard(item)
+
                 if poster:
                     try:
-                        await bot.send_photo(cid, poster, caption=text,
-                                             parse_mode=enums.ParseMode.HTML,
-                                             reply_markup=format_item_keyboard(item))
+                        await bot.send_photo(
+                            cid, poster, caption=text,
+                            parse_mode=enums.ParseMode.HTML,
+                            reply_markup=kb,
+                        )
                     except Exception as photo_exc:
-                        logger.warning(f"Photo send failed for {cid}, falling back to text: {photo_exc}")
-                        await bot.send_message(cid, text,
-                                               parse_mode=enums.ParseMode.HTML,
-                                               disable_web_page_preview=False,
-                                               reply_markup=format_item_keyboard(item))
+                        logger.warning(f"Photo send failed for {cid}, falling back: {photo_exc}")
+                        await bot.send_message(
+                            cid, text,
+                            parse_mode=enums.ParseMode.HTML,
+                            disable_web_page_preview=False,
+                            reply_markup=kb,
+                        )
                 else:
-                    await bot.send_message(cid, text,
-                                           parse_mode=enums.ParseMode.HTML,
-                                           disable_web_page_preview=False,
-                                           reply_markup=format_item_keyboard(item))
-                sent += 1
-                await asyncio.sleep(0.5)
+                    await bot.send_message(
+                        cid, text,
+                        parse_mode=enums.ParseMode.HTML,
+                        disable_web_page_preview=False,
+                        reply_markup=kb,
+                    )
+
+                sent_total += 1
+                await asyncio.sleep(0.5)          # stay inside Telegram rate limits
+
             except Exception as exc:
                 logger.warning(f"Failed to send to {cid}: {exc}")
                 if "Peer id invalid" in str(exc):
@@ -118,7 +147,11 @@ async def send_updates():
                     logger.warning(f"Disabled invalid target: {cid}")
                     break
 
-    logger.info(f"✅ Sent {sent} message(s) to {len(chat_ids)} chat(s).")
+    # Mark every successfully-processed item as sent (once, not per chat)
+    for item_id, item in new_items[:10]:
+        await mark_item_sent(item_id, title=item.get("title", ""))
+
+    logger.info(f"✅ Sent {sent_total} message(s) across {len(chat_ids)} chat(s).")
 
 
 # ─── Health-check HTTP server ─────────────────────────────────────────────────
@@ -126,7 +159,7 @@ async def _health(request):
     return web.Response(text="OK")
 
 
-async def start_health_server():
+async def start_health_server() -> None:
     app_web = web.Application()
     app_web.router.add_get("/",       _health)
     app_web.router.add_get("/health", _health)
@@ -137,8 +170,6 @@ async def start_health_server():
     logger.info(f"Health-check server listening on :{PORT}")
 
 
-
-
 def _loop_exception_handler(loop, context):
     msg = context.get("message", "Unhandled asyncio exception")
     exc = context.get("exception")
@@ -147,15 +178,32 @@ def _loop_exception_handler(loop, context):
     else:
         logger.error(msg)
 
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
-async def main():
-    bot_started = False
+async def main() -> None:
+    global bot
+
+    bot_started       = False
     scheduler_started = False
+
     try:
-        # 1. Connect MongoDB first (plugins import database at load time)
+        # 1. Connect MongoDB
         await init_db()
 
-        # 2. Schedule periodic updates
+        # 2. Create the Pyrogram Client HERE, inside the running event loop.
+        #    in_memory=True avoids SQLite entirely — correct for Koyeb/Docker
+        #    where there is no persistent writable filesystem.
+        bot = Client(
+            "ott_bot",
+            api_id=int(API_ID),
+            api_hash=API_HASH,
+            bot_token=BOT_TOKEN,
+            plugins=dict(root="plugins"),
+            parse_mode=enums.ParseMode.HTML,
+            in_memory=True,          # ← eliminates the "different loop" crash
+        )
+
+        # 3. Schedule periodic updates
         first_run = datetime.utcnow() + timedelta(minutes=10)
         scheduler.add_job(
             send_updates,
@@ -169,58 +217,30 @@ async def main():
         scheduler_started = True
         logger.info(f"Scheduler started — updates every {UPDATE_INTERVAL_HOURS}h")
 
-        # 3. Health-check server (non-blocking background task)
+        # 4. Health-check server (background)
         asyncio.create_task(start_health_server())
 
-        # 4. Start bot
+        # 5. Start bot
         await bot.start()
         bot_started = True
 
-        # Pyrogram 2.0.106 bot client does not expose webhook helper methods.
-        # Long polling works without this call, so skip webhook clearing.
-
-        # Register command hints shown by Telegram clients.
+        # Register command hints
         try:
             await bot.set_bot_commands([
-                BotCommand("start", "Start the bot"),
-                BotCommand("help", "Show help"),
-                BotCommand("subscribe", "Subscribe to auto updates"),
+                BotCommand("start",       "Start the bot"),
+                BotCommand("help",        "Show help"),
+                BotCommand("subscribe",   "Subscribe to auto updates"),
                 BotCommand("unsubscribe", "Unsubscribe from updates"),
-                BotCommand("latest", "Get latest releases now"),
-                BotCommand("platforms", "Show supported platforms"),
-                BotCommand("stats", "Show bot statistics"),
-                BotCommand("about", "About this bot"),
+                BotCommand("latest",      "Get latest releases now"),
+                BotCommand("platforms",   "Show supported platforms"),
+                BotCommand("stats",       "Show bot statistics"),
+                BotCommand("about",       "About this bot"),
             ])
         except Exception as exc:
             logger.warning(f"Failed to register bot commands: {exc}")
 
         me = await bot.get_me()
         logger.info(f"🤖 Bot started: @{me.username} ({me.id})")
-
-        # Send last discovered 10 releases on each restart to admin / configured chats.
-        try:
-            warm_items = (await get_new_releases(days_back=7, dedup=False))[:10]
-            targets: set[int | str] = set()
-            if ADMIN_ID:
-                targets.add(int(ADMIN_ID))
-            if CHAT_ID:
-                for raw in str(CHAT_ID).split(","):
-                    cid = raw.strip()
-                    if not cid:
-                        continue
-                    targets.add(int(cid) if cid.lstrip("-").isdigit() else cid)
-            for cid in targets:
-                for item in warm_items:
-                    try:
-                        text = format_item_message(item)
-                        await bot.send_message(cid, text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=False, reply_markup=format_item_keyboard(item))
-                    except Exception as exc:
-                        logger.warning(f"Startup send failed for {cid}: {exc}")
-                        if "Peer id invalid" in str(exc):
-                            _bad_targets.add(cid)
-                            break
-        except Exception as exc:
-            logger.warning(f"Startup last-10 send skipped: {exc}")
 
         # Notify admin on startup
         if ADMIN_ID:
@@ -241,18 +261,18 @@ async def main():
             except Exception as e:
                 logger.warning(f"Could not notify admin: {e}")
 
-        # 5. Block until killed
+        # 6. Block until killed
         await idle()
+
     finally:
-        # 6. Graceful shutdown
         if scheduler_started:
             scheduler.shutdown(wait=False)
         await close_db()
-        if bot_started:
+        if bot_started and bot is not None:
             try:
                 await bot.stop()
             except Exception as exc:
-                logger.warning(f"Ignored shutdown race while stopping bot: {exc}")
+                logger.warning(f"Ignored shutdown race: {exc}")
         logger.info("Bot stopped cleanly.")
 
 
@@ -260,4 +280,7 @@ if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.set_exception_handler(_loop_exception_handler)
-    loop.run_until_complete(main())
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
