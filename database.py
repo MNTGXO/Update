@@ -1,107 +1,112 @@
-import sqlite3
-import threading
-from contextlib import contextmanager
-from datetime import datetime
+"""
+database.py — MongoDB backend for OTT Updates Bot.
+
+Collections:
+  subscribers  – { chat_id, username, subscribed_at }
+  sent_items   – { item_id, title, sent_at }
+"""
+
+import logging
+from datetime import datetime, timezone
 from typing import List
 
-DB_PATH = "ott_bot.db"
-_lock = threading.Lock()
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ASCENDING
+
+from config import MONGO_URI, MONGO_DB_NAME
+
+logger = logging.getLogger("OTTBot.db")
+
+_client: AsyncIOMotorClient | None = None
+_db = None
 
 
-@contextmanager
-def _conn():
-    """Thread-safe SQLite connection context manager."""
-    with _lock:
-        con = sqlite3.connect(DB_PATH, check_same_thread=False)
-        con.row_factory = sqlite3.Row
-        try:
-            yield con
-            con.commit()
-        except Exception:
-            con.rollback()
-            raise
-        finally:
-            con.close()
+def get_db():
+    return _db
 
 
-def init_db() -> None:
-    """Create tables if they don't exist."""
-    with _conn() as con:
-        con.executescript("""
-            CREATE TABLE IF NOT EXISTS subscribers (
-                chat_id    INTEGER PRIMARY KEY,
-                username   TEXT,
-                subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
+async def init_db() -> None:
+    """Connect to MongoDB and ensure indexes exist."""
+    global _client, _db
+    _client = AsyncIOMotorClient(MONGO_URI)
+    _db = _client[MONGO_DB_NAME]
 
-            CREATE TABLE IF NOT EXISTS sent_items (
-                item_id  TEXT PRIMARY KEY,
-                title    TEXT,
-                sent_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
+    # Ensure indexes
+    await _db.subscribers.create_index("chat_id", unique=True)
+    await _db.sent_items.create_index("item_id", unique=True)
+    await _db.sent_items.create_index(
+        [("sent_at", ASCENDING)],
+        expireAfterSeconds=30 * 24 * 3600,   # auto-purge sent_items after 30 days
+    )
 
-            CREATE TABLE IF NOT EXISTS bot_stats (
-                key   TEXT PRIMARY KEY,
-                value TEXT
-            );
-        """)
+    # Ping to verify connection
+    await _client.admin.command("ping")
+    logger.info(f"✅ MongoDB connected → {MONGO_DB_NAME}")
+
+
+async def close_db() -> None:
+    if _client:
+        _client.close()
 
 
 # ─── Subscribers ──────────────────────────────────────────────────────────────
 
-def add_subscriber(chat_id: int, username: str = "") -> bool:
-    """Returns True if newly added, False if already existed."""
-    with _conn() as con:
-        cur = con.execute(
-            "INSERT OR IGNORE INTO subscribers (chat_id, username) VALUES (?, ?)",
-            (chat_id, username or ""),
+async def add_subscriber(chat_id: int, username: str = "") -> bool:
+    """Insert subscriber. Returns True if newly added, False if already existed."""
+    try:
+        result = await _db.subscribers.update_one(
+            {"chat_id": chat_id},
+            {"$setOnInsert": {
+                "chat_id":       chat_id,
+                "username":      username or "",
+                "subscribed_at": datetime.now(timezone.utc),
+            }},
+            upsert=True,
         )
-        return cur.rowcount > 0
+        return result.upserted_id is not None   # True only on fresh insert
+    except Exception as exc:
+        logger.error(f"add_subscriber error: {exc}")
+        return False
 
 
-def remove_subscriber(chat_id: int) -> bool:
-    """Returns True if removed, False if not found."""
-    with _conn() as con:
-        cur = con.execute("DELETE FROM subscribers WHERE chat_id = ?", (chat_id,))
-        return cur.rowcount > 0
+async def remove_subscriber(chat_id: int) -> bool:
+    """Returns True if found and removed."""
+    result = await _db.subscribers.delete_one({"chat_id": chat_id})
+    return result.deleted_count > 0
 
 
-def get_subscribers() -> List[int]:
-    with _conn() as con:
-        rows = con.execute("SELECT chat_id FROM subscribers").fetchall()
-    return [row["chat_id"] for row in rows]
+async def get_subscribers() -> List[int]:
+    cursor = _db.subscribers.find({}, {"chat_id": 1, "_id": 0})
+    return [doc["chat_id"] async for doc in cursor]
 
 
-def get_subscriber_count() -> int:
-    with _conn() as con:
-        return con.execute("SELECT COUNT(*) FROM subscribers").fetchone()[0]
+async def get_subscriber_count() -> int:
+    return await _db.subscribers.count_documents({})
 
 
-def is_subscriber(chat_id: int) -> bool:
-    with _conn() as con:
-        row = con.execute(
-            "SELECT 1 FROM subscribers WHERE chat_id = ?", (chat_id,)
-        ).fetchone()
-    return row is not None
+async def is_subscriber(chat_id: int) -> bool:
+    doc = await _db.subscribers.find_one({"chat_id": chat_id}, {"_id": 1})
+    return doc is not None
 
 
-# ─── Sent items dedup ─────────────────────────────────────────────────────────
+# ─── Sent-items dedup ─────────────────────────────────────────────────────────
 
-def is_item_sent(item_id: str) -> bool:
-    with _conn() as con:
-        return con.execute(
-            "SELECT 1 FROM sent_items WHERE item_id = ?", (item_id,)
-        ).fetchone() is not None
+async def is_item_sent(item_id: str) -> bool:
+    doc = await _db.sent_items.find_one({"item_id": item_id}, {"_id": 1})
+    return doc is not None
 
 
-def mark_item_sent(item_id: str, title: str = "") -> None:
-    with _conn() as con:
-        con.execute(
-            "INSERT OR IGNORE INTO sent_items (item_id, title, sent_at) VALUES (?, ?, ?)",
-            (item_id, title, datetime.utcnow().isoformat()),
-        )
+async def mark_item_sent(item_id: str, title: str = "") -> None:
+    await _db.sent_items.update_one(
+        {"item_id": item_id},
+        {"$setOnInsert": {
+            "item_id": item_id,
+            "title":   title,
+            "sent_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
 
 
-def get_sent_count() -> int:
-    with _conn() as con:
-        return con.execute("SELECT COUNT(*) FROM sent_items").fetchone()[0]
+async def get_sent_count() -> int:
+    return await _db.sent_items.count_documents({})
