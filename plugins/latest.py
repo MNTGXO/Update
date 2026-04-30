@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message, CallbackQuery
 
 from utils import get_new_releases, format_item_message
@@ -11,17 +11,17 @@ logger = logging.getLogger("OTTBot.latest")
 
 @Client.on_message(filters.command("latest"))
 async def latest_cmd(client: Client, message: Message):
-    await _latest(client, message.chat.id, reply=message.reply_text)
+    await _latest(client, message.chat.id, message.reply_text)
 
 
 @Client.on_callback_query(filters.regex("^latest$"))
 async def latest_cb(client: Client, cb: CallbackQuery):
     await cb.answer("Checking for new releases…")
-    await _latest(client, cb.message.chat.id, reply=cb.message.reply_text)
+    await _latest(client, cb.message.chat.id, cb.message.reply_text)
 
 
-async def _latest(client, chat_id: int, reply):
-    status = await reply("🔍 Fetching latest OTT releases…")
+async def _latest(client: Client, chat_id: int, reply_fn):
+    status = await reply_fn("🔍 Fetching latest OTT releases…")
 
     try:
         items = await get_new_releases(days_back=7)
@@ -32,8 +32,10 @@ async def _latest(client, chat_id: int, reply):
 
     if not items:
         await status.edit_text(
-            "😔 No new OTT releases found in the last 7 days.\n\n"
-            "Try again later or check [JustWatch](https://www.justwatch.com) directly.",
+            "😔 <b>No new OTT releases found in the last 7 days.</b>\n\n"
+            "Everything recent has already been sent, or there's nothing new yet.\n"
+            'Check <a href="https://www.justwatch.com">JustWatch</a> directly for more.',
+            parse_mode=enums.ParseMode.HTML,
             disable_web_page_preview=True,
         )
         return
@@ -41,17 +43,22 @@ async def _latest(client, chat_id: int, reply):
     await status.delete()
 
     sent = 0
-    for item in items[:10]:   # Cap at 10 items per manual check
+    for item in items[:10]:   # max 10 per manual fetch
         try:
-            text = format_item_message(item)
-            poster_url = item.get("poster", "")
-            if poster_url:
+            text   = format_item_message(item)
+            poster = item.get("poster", "")
+            if poster:
                 try:
-                    await client.send_photo(chat_id, poster_url, caption=text)
+                    await client.send_photo(chat_id, poster, caption=text,
+                                            parse_mode=enums.ParseMode.HTML)
                 except Exception:
-                    await client.send_message(chat_id, text, disable_web_page_preview=False)
+                    await client.send_message(chat_id, text,
+                                              parse_mode=enums.ParseMode.HTML,
+                                              disable_web_page_preview=False)
             else:
-                await client.send_message(chat_id, text, disable_web_page_preview=False)
+                await client.send_message(chat_id, text,
+                                          parse_mode=enums.ParseMode.HTML,
+                                          disable_web_page_preview=False)
             sent += 1
             await asyncio.sleep(0.6)
         except Exception as exc:
@@ -59,5 +66,6 @@ async def _latest(client, chat_id: int, reply):
 
     await client.send_message(
         chat_id,
-        f"✅ Done! Showing **{sent}** new release(s) from the last 7 days.",
+        f"✅ Done! Showing <b>{sent}</b> new release(s) from the last 7 days.",
+        parse_mode=enums.ParseMode.HTML,
     )
