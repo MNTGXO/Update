@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 from bs4 import BeautifulSoup
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import JUSTWATCH_COUNTRY, TMDB_API_KEY
 from database import is_item_sent, mark_item_sent
@@ -383,3 +384,16 @@ def format_item_message(item: Dict[str, Any]) -> str:
         lines.append(f'<a href="{tmdb_url}">📖 TMDB</a>  |  <a href="{jw_url}">🍿 JustWatch</a>')
 
     return "\n".join(lines)
+
+
+def format_item_keyboard(item: Dict[str, Any]) -> InlineKeyboardMarkup:
+    mpath = "movie" if item["type"] == "movie" else "tv"
+    country = JUSTWATCH_COUNTRY.lower()
+    tmdb_id = item.get("id", "")
+    tmdb_url = f"https://www.themoviedb.org/{mpath}/{tmdb_id}" if tmdb_id else None
+    jw_url = f"https://www.justwatch.com/{country}/{mpath}"
+
+    buttons = [[InlineKeyboardButton("▶️ Open JustWatch", url=jw_url)]]
+    if tmdb_url:
+        buttons.append([InlineKeyboardButton("🎬 Open TMDB", url=tmdb_url)])
+    return InlineKeyboardMarkup(buttons)

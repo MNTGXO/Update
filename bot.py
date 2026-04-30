@@ -11,7 +11,7 @@ from pyrogram.types import BotCommand
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import init_db, close_db, get_subscribers, get_auto_send_subscribers, remove_subscriber
-from utils import get_new_releases, format_item_message
+from utils import get_new_releases, format_item_message, format_item_keyboard
 from config import UPDATE_INTERVAL_HOURS, CHAT_ID, MONGO_URI, ADMIN_ID, JUSTWATCH_COUNTRY, TMDB_API_KEY, MONGO_DB_NAME
 
 load_dotenv()
@@ -94,16 +94,19 @@ async def send_updates():
                 if poster:
                     try:
                         await bot.send_photo(cid, poster, caption=text,
-                                             parse_mode=enums.ParseMode.HTML)
+                                             parse_mode=enums.ParseMode.HTML,
+                                             reply_markup=format_item_keyboard(item))
                     except Exception as photo_exc:
                         logger.warning(f"Photo send failed for {cid}, falling back to text: {photo_exc}")
                         await bot.send_message(cid, text,
                                                parse_mode=enums.ParseMode.HTML,
-                                               disable_web_page_preview=False)
+                                               disable_web_page_preview=False,
+                                               reply_markup=format_item_keyboard(item))
                 else:
                     await bot.send_message(cid, text,
                                            parse_mode=enums.ParseMode.HTML,
-                                           disable_web_page_preview=False)
+                                           disable_web_page_preview=False,
+                                           reply_markup=format_item_keyboard(item))
                 sent += 1
                 await asyncio.sleep(0.5)
             except Exception as exc:
@@ -210,7 +213,7 @@ async def main():
                 for item in warm_items:
                     try:
                         text = format_item_message(item)
-                        await bot.send_message(cid, text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=False)
+                        await bot.send_message(cid, text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=False, reply_markup=format_item_keyboard(item))
                     except Exception as exc:
                         logger.warning(f"Startup send failed for {cid}: {exc}")
                         if "Peer id invalid" in str(exc):

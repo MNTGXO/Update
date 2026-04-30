@@ -6,7 +6,7 @@ from pyrogram.types import Message
 
 from config import ADMIN_ID, CHAT_ID
 from database import get_subscribers
-from utils import get_new_releases, format_item_message
+from utils import get_new_releases, format_item_message, format_item_keyboard
 
 logger = logging.getLogger("OTTBot.broadcast")
 
@@ -109,13 +109,16 @@ async def sendnow(client: Client, message: Message):
                 if poster:
                     try:
                         await client.send_photo(cid, poster, caption=text,
-                                                parse_mode=enums.ParseMode.HTML)
+                                                parse_mode=enums.ParseMode.HTML,
+                                                reply_markup=format_item_keyboard(item))
                     except Exception:
                         await client.send_message(cid, text,
-                                                  parse_mode=enums.ParseMode.HTML)
+                                                  parse_mode=enums.ParseMode.HTML,
+                                                  reply_markup=format_item_keyboard(item))
                 else:
                     await client.send_message(cid, text,
-                                              parse_mode=enums.ParseMode.HTML)
+                                              parse_mode=enums.ParseMode.HTML,
+                                              reply_markup=format_item_keyboard(item))
                 sent += 1
                 await asyncio.sleep(0.5)
             except Exception as exc:
