@@ -138,14 +138,16 @@ async def _fetch_tmdb(days_back: int) -> List[Dict[str, Any]]:
 
 JW_GQL_URL = "https://apis.justwatch.com/graphql"
 
-JW_QUERY = """
-query GetNewContent($country: Country!, $language: Language!, $after: String) {
-  newContent(
+JW_QUERY_POPULAR = """
+query GetPopularTitles($country: Country!, $language: Language!) {
+  popularTitles(
     country: $country
-    language: $language
     first: 40
-    after: $after
-    filter: { objectTypes: [MOVIE, SHOW] }
+    sortBy: POPULAR
+    filter: {
+      objectTypes: [MOVIE, SHOW]
+      monetizationTypes: [FLATRATE, FREE, ADS]
+    }
   ) {
     edges {
       node {
@@ -156,13 +158,6 @@ query GetNewContent($country: Country!, $language: Language!, $after: String) {
           shortDescription
           originalReleaseYear
           posterUrl
-        }
-        watchNowOffer(
-          country: $country
-          platform: WEB
-          filter: { monetizationTypes: [FLATRATE, FREE, ADS] }
-        ) {
-          package { clearName shortName }
         }
         offers(
           country: $country
@@ -188,7 +183,7 @@ async def _fetch_justwatch(days_back: int) -> List[Dict[str, Any]]:
         "Accept":        "application/json",
     }
     payload = {
-        "query":     JW_QUERY,
+        "query":     JW_QUERY_POPULAR,
         "variables": {
             "country":  country_code,
             "language": "en",
@@ -211,7 +206,11 @@ async def _fetch_justwatch(days_back: int) -> List[Dict[str, Any]]:
             logger.error(f"JustWatch GraphQL error: {exc}")
             return []
 
-    edges = data.get("data", {}).get("newContent", {}).get("edges", [])
+    if data.get("errors"):
+        logger.warning(f"JustWatch GraphQL errors: {json.dumps(data['errors'])[:300]}")
+        return []
+
+    edges = data.get("data", {}).get("popularTitles", {}).get("edges", [])
     logger.info(f"JustWatch GraphQL → {len(edges)} edge(s)")
 
     for edge in edges:
@@ -244,6 +243,8 @@ async def _fetch_justwatch(days_back: int) -> List[Dict[str, Any]]:
         # JustWatch poster URL template
         if poster and "{profile}" in poster:
             poster = poster.replace("{profile}", "s592").replace("{format}", "jpg")
+        if poster.startswith("/"):
+            poster = f"https://images.justwatch.com{poster}"
 
         await mark_item_sent(item_id, title)
         results.append({
