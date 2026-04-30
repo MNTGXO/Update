@@ -1,4 +1,4 @@
-pyrogram==2.0.106
+pyrotgfork
 TgCrypto
 aiohttp>=3.9.0
 python-dotenv>=1.0.0
