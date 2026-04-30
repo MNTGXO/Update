@@ -10,7 +10,7 @@ from pyrogram import Client, idle, enums
 from pyrogram.types import BotCommand
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from database import init_db, close_db, get_subscribers
+from database import init_db, close_db, get_subscribers, get_auto_send_subscribers
 from utils import get_new_releases, format_item_message
 from config import UPDATE_INTERVAL_HOURS, CHAT_ID, MONGO_URI, ADMIN_ID, JUSTWATCH_COUNTRY, TMDB_API_KEY, MONGO_DB_NAME
 
@@ -75,7 +75,7 @@ async def send_updates():
 
     # Keep per-user subscribers active even when CHAT_ID is configured.
     # This avoids disabling commands if a channel ID is wrong/unreachable.
-    chat_ids.update(await get_subscribers())
+    chat_ids.update(await get_auto_send_subscribers())
 
     if not chat_ids:
         logger.info("No subscribers or CHAT_ID configured — skipping send.")
@@ -183,6 +183,19 @@ async def main():
 
         me = await bot.get_me()
         logger.info(f"🤖 Bot started: @{me.username} ({me.id})")
+
+        # Send last discovered 10 releases on each restart to admin / configured chats.
+        try:
+            warm_items = (await get_new_releases(days_back=7))[:10]
+            targets: set[int | str] = set(await get_subscribers())
+            if ADMIN_ID:
+                targets.add(int(ADMIN_ID))
+            for cid in targets:
+                for item in warm_items:
+                    text = format_item_message(item)
+                    await bot.send_message(cid, text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=False)
+        except Exception as exc:
+            logger.warning(f"Startup last-10 send skipped: {exc}")
 
         # Notify admin on startup
         if ADMIN_ID:
