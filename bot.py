@@ -6,12 +6,12 @@ from datetime import datetime, timedelta
 
 from aiohttp import web
 from dotenv import load_dotenv
-from pyrogram import Client, idle
+from pyrogram import Client, idle, enums
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from database import init_db, get_subscribers
+from database import init_db, close_db, get_subscribers
 from utils import get_new_releases, format_item_message
-from config import UPDATE_INTERVAL_HOURS, CHAT_ID
+from config import UPDATE_INTERVAL_HOURS, CHAT_ID, MONGO_URI
 
 load_dotenv()
 
@@ -21,8 +21,10 @@ API_HASH  = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT      = int(os.getenv("PORT", "8080"))
 
-if not BOT_TOKEN or not API_ID or not API_HASH:
-    print("ERROR: BOT_TOKEN, API_ID and API_HASH are all required in .env")
+missing = [k for k, v in {"BOT_TOKEN": BOT_TOKEN, "API_ID": API_ID,
+                           "API_HASH": API_HASH, "MONGO_URI": MONGO_URI}.items() if not v]
+if missing:
+    print(f"ERROR: Missing required env vars: {', '.join(missing)}")
     sys.exit(1)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -33,16 +35,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("OTTBot")
 
-# ─── Initialize DB ────────────────────────────────────────────────────────────
-init_db()
-
 # ─── Pyrogram Client ──────────────────────────────────────────────────────────
+# parse_mode=HTML so plugins can use <b>, <i>, <code> without escaping issues
 bot = Client(
     "ott_bot",
     api_id=int(API_ID),
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     plugins=dict(root="plugins"),
+    parse_mode=enums.ParseMode.HTML,
 )
 
 # ─── Scheduler ────────────────────────────────────────────────────────────────
@@ -57,7 +58,6 @@ async def send_updates():
         logger.info("No new releases found this cycle.")
         return
 
-    # Determine target chat IDs
     chat_ids: set[int] = set()
     if CHAT_ID:
         for cid in str(CHAT_ID).split(","):
@@ -65,23 +65,31 @@ async def send_updates():
             if cid:
                 chat_ids.add(int(cid))
     else:
-        chat_ids.update(get_subscribers())
+        chat_ids.update(await get_subscribers())
 
     if not chat_ids:
-        logger.info("No subscribers or CHAT_ID set — skipping send.")
+        logger.info("No subscribers or CHAT_ID configured — skipping send.")
         return
 
     sent = 0
     for cid in chat_ids:
         for item in items:
             try:
-                await bot.send_message(cid, format_item_message(item), disable_web_page_preview=False)
+                poster = item.get("poster", "")
+                text   = format_item_message(item)
+                if poster:
+                    await bot.send_photo(cid, poster, caption=text,
+                                         parse_mode=enums.ParseMode.HTML)
+                else:
+                    await bot.send_message(cid, text,
+                                           parse_mode=enums.ParseMode.HTML,
+                                           disable_web_page_preview=False)
                 sent += 1
-                await asyncio.sleep(0.5)          # Respect Telegram rate-limits
+                await asyncio.sleep(0.5)
             except Exception as exc:
                 logger.warning(f"Failed to send to {cid}: {exc}")
 
-    logger.info(f"✅ Sent {sent} message(s) across {len(chat_ids)} chat(s).")
+    logger.info(f"✅ Sent {sent} message(s) to {len(chat_ids)} chat(s).")
 
 
 # ─── Health-check HTTP server ─────────────────────────────────────────────────
@@ -91,7 +99,7 @@ async def _health(request):
 
 async def start_health_server():
     app_web = web.Application()
-    app_web.router.add_get("/", _health)
+    app_web.router.add_get("/",       _health)
     app_web.router.add_get("/health", _health)
     runner = web.AppRunner(app_web)
     await runner.setup()
@@ -102,29 +110,38 @@ async def start_health_server():
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 async def main():
-    # Fire one job shortly after start, then repeat on interval
-    first_run = datetime.now() + timedelta(seconds=15)
+    # 1. Connect MongoDB first (plugins import database at load time)
+    await init_db()
+
+    # 2. Schedule periodic updates
+    first_run = datetime.utcnow() + timedelta(seconds=20)
     scheduler.add_job(
         send_updates,
         "interval",
         hours=UPDATE_INTERVAL_HOURS,
         next_run_time=first_run,
         id="send_updates",
+        misfire_grace_time=300,
     )
     scheduler.start()
-    logger.info(f"Scheduler started — updates every {UPDATE_INTERVAL_HOURS}h (first run in ~15s)")
+    logger.info(f"Scheduler started — updates every {UPDATE_INTERVAL_HOURS}h")
 
+    # 3. Health-check server (non-blocking background task)
     asyncio.create_task(start_health_server())
 
+    # 4. Start bot
     await bot.start()
     me = await bot.get_me()
-    logger.info(f"Bot started: @{me.username} ({me.id})")
+    logger.info(f"🤖 Bot started: @{me.username} ({me.id})")
 
-    await idle()          # Block until SIGINT/SIGTERM
+    # 5. Block until killed
+    await idle()
 
+    # 6. Graceful shutdown
     scheduler.shutdown(wait=False)
+    await close_db()
     await bot.stop()
-    logger.info("Bot stopped.")
+    logger.info("Bot stopped cleanly.")
 
 
 if __name__ == "__main__":
