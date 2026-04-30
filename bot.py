@@ -157,12 +157,8 @@ async def main():
         await bot.start()
         bot_started = True
 
-        # Ensure long polling works even if a webhook was previously configured.
-        try:
-            await bot.set_webhook(url="", drop_pending_updates=False)
-            logger.info("Webhook cleared; long polling is active.")
-        except Exception as exc:
-            logger.warning(f"Failed to clear webhook (non-fatal): {exc}")
+        # Pyrogram 2.0.106 bot client does not expose webhook helper methods.
+        # Long polling works without this call, so skip webhook clearing.
 
         # Register command hints shown by Telegram clients.
         try:
@@ -211,7 +207,7 @@ async def main():
         if bot_started:
             try:
                 await bot.stop()
-            except RuntimeError as exc:
+            except Exception as exc:
                 logger.warning(f"Ignored shutdown race while stopping bot: {exc}")
         logger.info("Bot stopped cleanly.")
 
