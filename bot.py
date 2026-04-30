@@ -8,7 +8,6 @@ from aiohttp import web
 from dotenv import load_dotenv
 from pyrogram import Client, idle, enums
 from pyrogram.types import BotCommand
-from pyrogram.raw.functions.bots import DeleteWebhook
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import init_db, close_db, get_subscribers
@@ -131,80 +130,90 @@ def _loop_exception_handler(loop, context):
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 async def main():
-    # 1. Connect MongoDB first (plugins import database at load time)
-    await init_db()
-
-    # 2. Schedule periodic updates
-    first_run = datetime.utcnow() + timedelta(seconds=20)
-    scheduler.add_job(
-        send_updates,
-        "interval",
-        hours=UPDATE_INTERVAL_HOURS,
-        next_run_time=first_run,
-        id="send_updates",
-        misfire_grace_time=300,
-    )
-    scheduler.start()
-    logger.info(f"Scheduler started — updates every {UPDATE_INTERVAL_HOURS}h")
-
-    # 3. Health-check server (non-blocking background task)
-    asyncio.create_task(start_health_server())
-
-    # 4. Start bot
-    await bot.start()
-
-    # Ensure long polling works even if a webhook was previously configured.
+    bot_started = False
+    scheduler_started = False
     try:
-        await bot.invoke(DeleteWebhook(drop_pending_updates=False))
-        logger.info("Webhook cleared via raw API; long polling is active.")
-    except Exception as exc:
-        logger.error(f"Failed to clear webhook: {exc}", exc_info=True)
+        # 1. Connect MongoDB first (plugins import database at load time)
+        await init_db()
 
-    # Register command hints shown by Telegram clients.
-    try:
-        await bot.set_bot_commands([
-            BotCommand("start", "Start the bot"),
-            BotCommand("help", "Show help"),
-            BotCommand("subscribe", "Subscribe to auto updates"),
-            BotCommand("unsubscribe", "Unsubscribe from updates"),
-            BotCommand("latest", "Get latest releases now"),
-            BotCommand("platforms", "Show supported platforms"),
-            BotCommand("stats", "Show bot statistics"),
-            BotCommand("about", "About this bot"),
-        ])
-    except Exception as exc:
-        logger.warning(f"Failed to register bot commands: {exc}")
+        # 2. Schedule periodic updates
+        first_run = datetime.utcnow() + timedelta(seconds=20)
+        scheduler.add_job(
+            send_updates,
+            "interval",
+            hours=UPDATE_INTERVAL_HOURS,
+            next_run_time=first_run,
+            id="send_updates",
+            misfire_grace_time=300,
+        )
+        scheduler.start()
+        scheduler_started = True
+        logger.info(f"Scheduler started — updates every {UPDATE_INTERVAL_HOURS}h")
 
-    me = await bot.get_me()
-    logger.info(f"🤖 Bot started: @{me.username} ({me.id})")
+        # 3. Health-check server (non-blocking background task)
+        asyncio.create_task(start_health_server())
 
-    # Notify admin on startup
-    if ADMIN_ID:
-        source = "TMDB API ✅" if TMDB_API_KEY else "JustWatch GraphQL"
+        # 4. Start bot
+        await bot.start()
+        bot_started = True
+
+        # Ensure long polling works even if a webhook was previously configured.
         try:
-            await bot.send_message(
-                int(ADMIN_ID),
-                f"🟢 <b>Bot Restarted Successfully!</b>\n\n"
-                f"🤖 <b>Username:</b> @{me.username}\n"
-                f"🆔 <b>Bot ID:</b> <code>{me.id}</code>\n"
-                f"🌍 <b>Region:</b> <code>{JUSTWATCH_COUNTRY}</code>\n"
-                f"🗃 <b>Database:</b> <code>{MONGO_DB_NAME}</code>\n"
-                f"📡 <b>Data source:</b> {source}\n"
-                f"🔄 <b>Update interval:</b> every {UPDATE_INTERVAL_HOURS}h\n\n"
-                f"✅ All systems operational.",
-                parse_mode=enums.ParseMode.HTML,
-            )
-        except Exception as e:
-            logger.warning(f"Could not notify admin: {e}")
+            await bot.set_webhook(url="", drop_pending_updates=False)
+            logger.info("Webhook cleared; long polling is active.")
+        except Exception as exc:
+            logger.warning(f"Failed to clear webhook (non-fatal): {exc}")
 
-    # 5. Block until killed
-    await idle()
+        # Register command hints shown by Telegram clients.
+        try:
+            await bot.set_bot_commands([
+                BotCommand("start", "Start the bot"),
+                BotCommand("help", "Show help"),
+                BotCommand("subscribe", "Subscribe to auto updates"),
+                BotCommand("unsubscribe", "Unsubscribe from updates"),
+                BotCommand("latest", "Get latest releases now"),
+                BotCommand("platforms", "Show supported platforms"),
+                BotCommand("stats", "Show bot statistics"),
+                BotCommand("about", "About this bot"),
+            ])
+        except Exception as exc:
+            logger.warning(f"Failed to register bot commands: {exc}")
 
-    # 6. Graceful shutdown
-    scheduler.shutdown(wait=False)
-    await close_db()
-    await bot.stop()
-    logger.info("Bot stopped cleanly.")
+        me = await bot.get_me()
+        logger.info(f"🤖 Bot started: @{me.username} ({me.id})")
+
+        # Notify admin on startup
+        if ADMIN_ID:
+            source = "TMDB API ✅" if TMDB_API_KEY else "JustWatch GraphQL"
+            try:
+                await bot.send_message(
+                    int(ADMIN_ID),
+                    f"🟢 <b>Bot Restarted Successfully!</b>\n\n"
+                    f"🤖 <b>Username:</b> @{me.username}\n"
+                    f"🆔 <b>Bot ID:</b> <code>{me.id}</code>\n"
+                    f"🌍 <b>Region:</b> <code>{JUSTWATCH_COUNTRY}</code>\n"
+                    f"🗃 <b>Database:</b> <code>{MONGO_DB_NAME}</code>\n"
+                    f"📡 <b>Data source:</b> {source}\n"
+                    f"🔄 <b>Update interval:</b> every {UPDATE_INTERVAL_HOURS}h\n\n"
+                    f"✅ All systems operational.",
+                    parse_mode=enums.ParseMode.HTML,
+                )
+            except Exception as e:
+                logger.warning(f"Could not notify admin: {e}")
+
+        # 5. Block until killed
+        await idle()
+    finally:
+        # 6. Graceful shutdown
+        if scheduler_started:
+            scheduler.shutdown(wait=False)
+        await close_db()
+        if bot_started:
+            try:
+                await bot.stop()
+            except RuntimeError as exc:
+                logger.warning(f"Ignored shutdown race while stopping bot: {exc}")
+        logger.info("Bot stopped cleanly.")
 
 
 if __name__ == "__main__":
