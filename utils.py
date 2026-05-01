@@ -9,6 +9,7 @@ Priority:
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -98,7 +99,7 @@ async def _fetch_tmdb(days_back: int, dedup: bool = True) -> List[Dict[str, Any]
             if not data:
                 continue
 
-            items = data.get("results", [])[:25]
+            items = data.get("results", [])
             logger.info(f"TMDB /discover/{mt} → {len(items)} item(s)")
 
             provider_results = await asyncio.gather(
@@ -140,12 +141,13 @@ async def _fetch_tmdb(days_back: int, dedup: bool = True) -> List[Dict[str, Any]
 # ─── JustWatch GraphQL fallback ───────────────────────────────────────────────
 
 JW_GQL_URL = "https://apis.justwatch.com/graphql"
+OTTRELEASE_STREAMING_NOW_URL = "https://www.ottrelease.com/streaming-now"
 
 JW_QUERY_POPULAR = """
 query GetPopularTitles($country: Country!, $language: Language!) {
   popularTitles(
     country: $country
-    first: 40
+    first: 200
     sortBy: POPULAR
     filter: {
       objectTypes: [MOVIE, SHOW]
@@ -258,7 +260,7 @@ async def _fetch_justwatch(days_back: int, dedup: bool = True) -> List[Dict[str,
             "title":        title,
             "release_date": str(year),
             "overview":     overview,
-            "providers":    providers[:6],
+            "providers":    providers,
             "poster":       poster,
             "rating":       0,
             "genre_ids":    [],
@@ -299,7 +301,7 @@ async def _fetch_justwatch_web(dedup: bool = True) -> List[Dict[str, Any]]:
         return parsed
 
     parsed_items = await asyncio.to_thread(_parse, html)
-    for href, title, poster, provider in parsed_items[:40]:
+    for href, title, poster, provider in parsed_items:
         item_id = f"jw_web_{href}"
         if dedup and await is_item_sent(item_id):
             continue
@@ -323,6 +325,97 @@ async def _fetch_justwatch_web(dedup: bool = True) -> List[Dict[str, Any]]:
     return results
 
 
+def _normalize_title(title: str) -> str:
+    return re.sub(r"\s+", " ", (title or "").strip().lower())
+
+
+def _normalize_release_date(release_date: str) -> str:
+    date = (release_date or "").strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return date
+
+
+async def _fetch_ottrelease(dedup: bool = True) -> List[Dict[str, Any]]:
+    """Scrape OTTRelease streaming-now + detail pages."""
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; OTTBot/3.0)"}
+    results: List[Dict[str, Any]] = []
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        try:
+            async with session.get(OTTRELEASE_STREAMING_NOW_URL, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status != 200:
+                    logger.warning(f"OTTRelease streaming-now HTTP {r.status}")
+                    return []
+                html = await r.text()
+        except Exception as exc:
+            logger.error(f"OTTRelease streaming-now scrape error: {exc}")
+            return []
+
+        soup = BeautifulSoup(html, "html.parser")
+        links = []
+        for a in soup.select("div.streaming-now-grid div.stream-item a[href]"):
+            href = (a.get("href") or "").strip()
+            title_el = a.select_one(".stream-title")
+            date_el = a.select_one(".stream-date")
+            title = (title_el.get_text(strip=True) if title_el else "").strip()
+            raw_date = (date_el.get_text(strip=True) if date_el else "").replace("Released:", "").strip()
+            img = a.select_one("img")
+            poster = (img.get("src") or "").strip() if img else ""
+            if href and title:
+                links.append((href, title, raw_date, poster))
+
+        for href, title, rel_date, poster in links:
+            providers: list[str] = []
+            overview = "No description."
+            genres: list[str] = []
+            try:
+                async with session.get(href, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                    if r.status == 200:
+                        detail_html = await r.text()
+                        dsoup = BeautifulSoup(detail_html, "html.parser")
+                        for badge in dsoup.select(".ott-badge a"):
+                            provider = badge.get_text(strip=True)
+                            if provider and provider not in providers:
+                                providers.append(provider)
+                        story_p = dsoup.select_one(".movie-description p:last-child")
+                        if story_p:
+                            overview = (story_p.get_text(" ", strip=True) or overview)[:600]
+                        for g in dsoup.select("p.movie-submeta a[href*='/genre/']"):
+                            genre_name = g.get_text(strip=True)
+                            if genre_name:
+                                genres.append(genre_name)
+            except Exception as exc:
+                logger.warning(f"OTTRelease detail scrape failed ({href}): {exc}")
+
+            item_id = f"ottrelease_{href.rstrip('/').split('/')[-1]}"
+            if dedup and await is_item_sent(item_id):
+                continue
+            if dedup:
+                await mark_item_sent(item_id, title)
+
+            results.append({
+                "id": href,
+                "item_id": item_id,
+                "type": "tv" if "/web-series/" in href or "/tv-show/" in href else "movie",
+                "title": title,
+                "release_date": rel_date,
+                "overview": overview,
+                "providers": providers,
+                "poster": poster,
+                "rating": 0,
+                "genre_ids": [],
+                "genre_names": genres,
+                "source": "ottrelease",
+            })
+
+    logger.info(f"OTTRelease scrape → {len(results)} item(s)")
+    return results
+
+
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 async def get_new_releases(days_back: int = 7, dedup: bool = True) -> List[Dict[str, Any]]:
@@ -335,8 +428,22 @@ async def get_new_releases(days_back: int = 7, dedup: bool = True) -> List[Dict[
         if not items:
             items = await _fetch_justwatch(days_back, dedup=dedup)
 
-    logger.info(f"get_new_releases → {len(items)} new item(s)")
-    return items
+    ottrelease_items = await _fetch_ottrelease(dedup=dedup)
+
+    merged: List[Dict[str, Any]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for item in items + ottrelease_items:
+        key = (
+            _normalize_title(item.get("title", "")),
+            _normalize_release_date(item.get("release_date", "")),
+        )
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        merged.append(item)
+
+    logger.info(f"get_new_releases → {len(merged)} new item(s) after merge/dedup")
+    return merged
 
 
 # ─── Message formatter (HTML) ─────────────────────────────────────────────────
