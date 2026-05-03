@@ -11,7 +11,7 @@ from utils import get_new_releases, format_item_message, format_item_keyboard
 logger = logging.getLogger("OTTBot.broadcast")
 
 
-# ─── Admin filter ─────────────────────────────────────────────────────────────
+# ─── Admin filter ────────────────────────────────────────────────────────────
 
 def _is_admin(_, __, message: Message) -> bool:
     if not ADMIN_ID:
