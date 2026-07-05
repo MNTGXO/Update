@@ -25,9 +25,6 @@ A Telegram bot that automatically notifies you when new movies and TV shows land
 |---|---|
 | `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` |
 | `API_ID` / `API_HASH` | https://my.telegram.org/apps |
-| `TMDB_API_KEY` | https://www.themoviedb.org/settings/api (free) |
-
-> **TMDB key is optional but strongly recommended.** Without it the bot falls back to JustWatch scraping which is less reliable.
 
 ### 2. Configure environment
 
